@@ -46,6 +46,8 @@ RELEASES_TOPIC_NAME = _env("RELEASES_TOPIC_NAME", "🆕 New Releases")
 RELEASE_MAX_AGE_HOURS = int(_env("RELEASE_MAX_AGE_HOURS", "72"))  # ignore older uploads
 RELEASE_MIN_SECONDS = int(_env("RELEASE_MIN_SECONDS", "60"))
 RELEASE_MAX_SECONDS = int(_env("RELEASE_MAX_SECONDS", "720"))
+FAV_TOPIC_NAME = _env("FAV_TOPIC_NAME", "❤️ Favorites")  # songs you react to with a heart
+FAV_EMOJIS = {e.strip().replace("\ufe0f", "") for e in _env("FAV_EMOJIS", "❤").split(",") if e.strip()}
 PICKS_TOPIC_NAME = _env("PICKS_TOPIC_NAME", "🎧 Picks")  # songs added from the search menu
 RELEASE_MAX_ATTEMPTS = int(_env("RELEASE_MAX_ATTEMPTS", "20"))
 
@@ -85,6 +87,8 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS source_state (src TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS attempts (item TEXT PRIMARY KEY, n INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS lyrics_cache (key TEXT PRIMARY KEY, text TEXT);
+    CREATE TABLE IF NOT EXISTS audios (msg_id INTEGER PRIMARY KEY, key TEXT);
+    CREATE TABLE IF NOT EXISTS favs (key TEXT PRIMARY KEY, src_msg INTEGER, fav_msg INTEGER, uid INTEGER);
     CREATE TABLE IF NOT EXISTS picks (
         key TEXT PRIMARY KEY, dz_id INTEGER, artist TEXT, title TEXT, added_at TEXT DEFAULT CURRENT_TIMESTAMP);
     """
@@ -129,12 +133,21 @@ async def topic_id_for(bot: Bot, key: str, name: str, color: int | None = None, 
     return topic.message_thread_id
 
 
-async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, audio, **kw):
+def record_audio(msg_id: int, song_key: str) -> None:
+    """Remember which song a group message holds (needed to react ❤️ -> Favorites)."""
+    db.execute("INSERT OR REPLACE INTO audios VALUES (?, ?)", (msg_id, song_key))
+    db.commit()
+
+
+async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, audio, song_key: str | None = None, **kw):
     """Send audio into a named topic; recreate the topic once if someone deleted it."""
     for attempt in (1, 2):
         topic_id = await topic_id_for(bot, key, name, color, force_new=(attempt == 2))
         try:
-            return await tg_call(lambda: bot.send_audio(CHAT_ID, audio, message_thread_id=topic_id, **kw))
+            msg = await tg_call(lambda: bot.send_audio(CHAT_ID, audio, message_thread_id=topic_id, **kw))
+            if song_key:
+                record_audio(msg.message_id, song_key)
+            return msg
         except TelegramBadRequest as e:
             if attempt == 1 and "thread" in str(e).lower():
                 log.error("topic %s was deleted, creating a new one", key)

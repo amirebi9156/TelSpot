@@ -8,6 +8,8 @@ Your music, in Telegram. One private supergroup with Topics, and a light bot (si
 
 4. **Control from Telegram**: everything above can be managed from the group or from a private chat with the bot (see below).
 
+4. **Favorites**: react with ❤️ to any song in the group and the bot copies it into the `❤️ Favorites` topic (created on first use). Remove the heart and the copy is removed. Needs the bot to be a group admin; songs sent before this feature that came from playlists work too, older new-release/search songs do not.
+
 No Spotify login, developer app or Premium is needed. Playlists are read from Spotify's public embed page, so each playlist just has to be **Public**.
 
 ## Using it from Telegram
@@ -21,6 +23,7 @@ Works in the group and in a private chat with the bot (DM only for members of th
 | `/playlists`, `/addplaylist link` | List / add playlists (DM: paste a Spotify link). Admins only for add/remove |
 | `/artists` | Artists you follow for new releases |
 | `/status` | Health, failed songs, connection check, **Retry failed** (admins) |
+| `/favorites` | Link to the Favorites topic and how many songs are in it |
 | `/lyrics` | Lyrics (sent to you privately): reply to a song, or `/lyrics Artist - Title`, or in private just send the name / music file |
 
 Search shows matching artists and songs (metadata from Deezer's public API). Tap a song to add it to the `🎧 Picks` topic, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
@@ -68,6 +71,7 @@ Afterwards open the management menu any time with `sudo spotigram`. It covers in
 | `RELEASE_INTERVAL` | Seconds between new-release checks (default 180) |
 | `RELEASES_TOPIC_NAME` | Name of the new-releases topic |
 | `PICKS_TOPIC_NAME` | Name of the topic for songs added from search |
+| `FAV_TOPIC_NAME`, `FAV_EMOJIS` | Favorites topic name; reactions that count as a like (default `❤`, e.g. `❤,🔥`) |
 | `RELEASE_MAX_AGE_HOURS`, `RELEASE_MIN_SECONDS`, `RELEASE_MAX_SECONDS` | Release filters |
 | `YTDLP_COOKIES` | Optional cookies.txt path if YouTube blocks the server |
 

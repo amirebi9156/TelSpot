@@ -262,7 +262,8 @@ async def send_release(
 
         await send_audio_topic(
             bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, FSInputFile(path), title=title,
-            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption
+            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption,
+            song_key=release_key(artist.name, title)
         )
         db.execute(
             "INSERT OR REPLACE INTO releases (key, artist, title, platform, url) VALUES (?,?,?,?,?)",

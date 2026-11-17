@@ -23,6 +23,7 @@ from aiogram.types import (
     InlineKeyboardMarkup, Message,
 )
 
+import favorites
 import health
 import music
 import playlists
@@ -142,7 +143,8 @@ def main_menu() -> tuple[str, InlineKeyboardMarkup]:
         KB([
             [B("🔎  Search songs & artists", "m:se", style="primary")],
             [B("🎵  Playlists", "m:pl"), B("🎤  Artists", "m:ar")],
-            [B("📝  Lyrics", "m:ly"), B("📊  Status", "m:st")],
+            [B("❤️  Favorites", "m:fv"), B("📝  Lyrics", "m:ly")],
+            [B("📊  Status", "m:st")],
         ]),
     )
 
@@ -177,6 +179,15 @@ def artists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
             kb_rows.append([B(f"✖  {cut(a.name, 32)}", f"ar:rm:{releases.artist_hash(a.name)}", style="danger")])
     kb_rows.append([B("‹ Menu", "m:main")])
     return "\n".join(lines), KB(kb_rows)
+
+
+def favorites_screen() -> tuple[str, InlineKeyboardMarkup]:
+    link = topic_link(favorites.topic_id())
+    n = favorites.count()
+    text = ("❤️ <b>Favorites</b>\n<blockquote>React with ❤️ to any song in the group and it is copied into the "
+            "Favorites topic. Remove the heart to remove it again.</blockquote>\n"
+            f"{n} song(s) so far" + (f" · <a href=\"{link}\">open topic</a>" if link else ""))
+    return text, KB([[B("‹ Menu", "m:main")]])
 
 
 def ago(ts: float | None) -> str:
@@ -216,7 +227,7 @@ def help_text() -> str:
         "📝 <b>Lyrics</b>\n<blockquote>Lyrics are sent to you in private, so the group stays clean.</blockquote>\n"
         "• Open me in private and send a song name or the music file\n"
         "• Or reply to a song in the group with /lyrics (or the word متن)\n\n"
-        "<b>Commands</b>\n/menu · /search name · /playlists · /addplaylist link · /artists · /status · /lyrics\n"
+        "<b>Commands</b>\n/menu · /favorites · /search name · /playlists · /addplaylist link · /artists · /status · /lyrics\n"
         "In private you can also just type an artist or song name, or paste a Spotify playlist link."
     )
 
@@ -369,7 +380,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
     try:
         cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
         if cached:
-            msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0])
+            msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0], song_key=key)
         else:
             tmp = tempfile.mkdtemp(prefix="spotigram_pick_")
             try:
@@ -384,7 +395,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
                     async with aiohttp.ClientSession() as session:
                         img = await fetch_image(session, tr["cover"], max_bytes=200_000)
                 msg = await send_audio_topic(
-                    bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, FSInputFile(path),
+                    bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, FSInputFile(path), song_key=key,
                     title=tr["title"], performer=tr["artist"], duration=tr["duration"] or None,
                     thumbnail=BufferedInputFile(img, "cover.jpg") if img else None
                 )
@@ -498,6 +509,14 @@ async def cmd_playlists(m: Message, bot: Bot) -> None:
     await say(bot, m, text, kb)
 
 
+@router.message(ALLOWED_MSG, Command("favorites", "fav"))
+async def cmd_favorites(m: Message, bot: Bot) -> None:
+    if not await can_use(bot, m.chat, m.from_user.id):
+        return await deny(m, bot)
+    text, kb = favorites_screen()
+    await say(bot, m, text, kb)
+
+
 @router.message(ALLOWED_MSG, Command("status"))
 async def cmd_status(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
@@ -583,6 +602,9 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         what = p[1]
         if what == "main":
             text, kb = main_menu()
+            return await edit(cb, text, kb)
+        if what == "fv":
+            text, kb = favorites_screen()
             return await edit(cb, text, kb)
         if what == "pl":
             text, kb = playlists_screen(await need_admin(bot, uid))

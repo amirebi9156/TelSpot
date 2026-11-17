@@ -20,6 +20,7 @@ from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 
+import favorites
 import lyrics
 import playlists
 import releases
@@ -129,6 +130,7 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)  # lyrics first, then the menu
     dp.include_router(ui.router)
+    dp.include_router(favorites.router)
     try:
         cmds = [
             BotCommand(command="menu", description="Open the menu"),
@@ -136,6 +138,7 @@ async def main() -> None:
             BotCommand(command="playlists", description="Show / add playlists"),
             BotCommand(command="addplaylist", description="Add a Spotify playlist"),
             BotCommand(command="artists", description="Artists I follow"),
+            BotCommand(command="favorites", description="Songs you hearted"),
             BotCommand(command="status", description="Bot health and failed songs"),
             BotCommand(command="lyrics", description="Find lyrics (sent to you privately)"),
         ]
@@ -148,7 +151,7 @@ async def main() -> None:
             playlists.sync_loop(bot),
             releases.release_loop(bot),
             # handle_signals=False: let SIGTERM from systemd stop the whole process
-            dp.start_polling(bot, allowed_updates=["message", "callback_query"], handle_signals=False),
+            dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction"], handle_signals=False),
         )
     finally:
         await bot.session.close()
