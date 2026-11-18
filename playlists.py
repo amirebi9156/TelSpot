@@ -216,7 +216,7 @@ async def send_track(bot: Bot, topic_id: int, track: dict, session: aiohttp.Clie
         )
         return msg.message_id
 
-    tmp = tempfile.mkdtemp(prefix="spotigram_")
+    tmp = tempfile.mkdtemp(prefix="telspot_")
     try:
         async with dl_lock():
             path = await asyncio.to_thread(download_audio, track, tmp)
@@ -406,7 +406,7 @@ async def _sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> 
 async def sync_all(bot: Bot) -> None:
     ids = read_playlist_ids()
     if not ids:
-        log.warning("no playlists configured (add links with: spotigram -> Manage playlists)")
+        log.warning("no playlists configured (add links with: telspot -> Manage playlists)")
         return
     async with aiohttp.ClientSession() as session:
         for pid in ids:

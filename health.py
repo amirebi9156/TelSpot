@@ -25,11 +25,11 @@ def hint(err: str) -> str:
     if "429" in e or "too many requests" in e:
         return "Rate limited (HTTP 429). It usually clears by itself; if it lasts, use cookies or a different IP."
     if "403" in e:
-        return "Access denied (HTTP 403). Try: spotigram -> Update yt-dlp."
+        return "Access denied (HTTP 403). Try: telspot -> Update yt-dlp."
     if "404" in e or "not found" in e:
         return "Not found (HTTP 404). The source may be wrong or deleted."
     if "unable to extract" in e or "unsupported url" in e or "nsig" in e or "signature" in e:
-        return "yt-dlp is probably outdated. Fix: spotigram -> Update yt-dlp."
+        return "yt-dlp is probably outdated. Fix: telspot -> Update yt-dlp."
     if "timed out" in e or "connection" in e or "network" in e:
         return "Network problem on the server."
     return ""

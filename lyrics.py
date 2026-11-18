@@ -11,7 +11,7 @@ from aiogram.types import BufferedInputFile, Message, ReplyParameters
 from core import db, log, tg_call
 
 API = "https://lrclib.net/api"
-UA = {"User-Agent": "Spotigram/1.0 (https://github.com/amirebi9156/spotigram)"}
+UA = {"User-Agent": "TelSpot/1.0 (https://github.com/amirebi9156/TelSpot)"}
 MSG_LIMIT = 4000  # Telegram allows 4096 characters per message
 MAX_MESSAGES = 3  # longer lyrics are sent as a .txt file instead
 

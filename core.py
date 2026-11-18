@@ -1,4 +1,4 @@
-"""Shared config, database, Telegram and yt-dlp helpers for Spotigram."""
+"""Shared config, database, Telegram and yt-dlp helpers for Tel Spot."""
 from __future__ import annotations
 
 import asyncio
@@ -64,7 +64,7 @@ AUDIO_FMT_YT = "bestaudio[ext=m4a]/bestaudio"
 AUDIO_FMT_SC = "http_mp3_128/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("spotigram")
+log = logging.getLogger("telspot")
 
 # ---------------------------------------------------------------- database
 db = sqlite3.connect(DB_PATH)

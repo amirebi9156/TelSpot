@@ -1,5 +1,5 @@
 """
-Spotigram: Spotify playlists -> Telegram topics, new-release monitor, lyrics.
+Tel Spot: Spotify playlists -> Telegram topics, new-release monitor, lyrics.
 
 Usage:
     python bot.py                    # run everything
@@ -25,7 +25,7 @@ import lyrics
 import playlists
 import releases
 import ui
-from core import ALLOWED_CB, ALLOWED_MSG, BOT_TOKEN, CHAT_ID, can_use, log
+from core import ALLOWED_CB, ALLOWED_MSG, BOT_TOKEN, CHAT_ID, can_use, db, log
 
 router = Router()
 
@@ -123,6 +123,35 @@ async def on_private_audio(message: Message, bot: Bot) -> None:
     await lyrics_for_audio(bot, message, message.from_user.id)
 
 
+PROFILE_VERSION = "telspot-1"  # bump to push a new name/description to Telegram on next start
+
+
+async def setup_identity(bot: Bot) -> None:
+    """Names the bot and notices when the token belongs to a different bot than before
+    (file_ids are per bot, so the cache of uploaded files must be dropped then)."""
+    try:
+        me = await bot.me()
+        row = db.execute("SELECT value FROM meta WHERE key='bot_id'").fetchone()
+        if row and row[0] != str(me.id):
+            n = db.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+            db.execute("DELETE FROM files")
+            log.warning("bot changed (%s -> %s): dropped %d cached file ids", row[0], me.id, n)
+        db.execute("INSERT OR REPLACE INTO meta VALUES ('bot_id', ?)", (str(me.id),))
+        db.commit()
+        done = db.execute("SELECT value FROM meta WHERE key='bot_profile'").fetchone()
+        if not done or done[0] != f"{PROFILE_VERSION}:{me.id}":
+            await bot.set_my_name("Tel Spot")
+            await bot.set_my_short_description("Your music in Telegram: Spotify playlists, new releases, lyrics, favorites.")
+            await bot.set_my_description(
+                "Tel Spot mirrors your Spotify playlists into a Telegram group, sends new releases from artists you "
+                "follow, finds lyrics and keeps your favorites. Open the menu with /menu."
+            )
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('bot_profile', ?)", (f"{PROFILE_VERSION}:{me.id}",))
+            db.commit()
+    except Exception as e:
+        log.warning("could not set up bot identity: %s", e)
+
+
 async def main() -> None:
     if not BOT_TOKEN or not CHAT_ID:
         sys.exit("BOT_TOKEN and CHAT_ID must be set in .env")
@@ -131,6 +160,7 @@ async def main() -> None:
     dp.include_router(router)  # lyrics first, then the menu
     dp.include_router(ui.router)
     dp.include_router(favorites.router)
+    await setup_identity(bot)
     try:
         cmds = [
             BotCommand(command="menu", description="Open the menu"),

@@ -1,5 +1,5 @@
 """
-Telegram menu for Spotigram: playlists, artists, search, add songs, follow artists.
+Telegram menu for Tel Spot: playlists, artists, search, add songs, follow artists.
 Works both inside the group (commands/buttons) and in a private chat with the bot
 (for members of the group). Management actions need a group admin.
 """
@@ -139,7 +139,7 @@ def remember(tracks: list[dict]) -> None:
 # ----------------------------------------------------------------- screens
 def main_menu() -> tuple[str, InlineKeyboardMarkup]:
     return (
-        "🎧 <b>Spotigram</b>\n<blockquote>Your music, in Telegram.</blockquote>",
+        "🎧 <b>Tel Spot</b>\n<blockquote>Your music, in Telegram.</blockquote>",
         KB([
             [B("🔎  Search songs & artists", "m:se", style="primary")],
             [B("🎵  Playlists", "m:pl"), B("🎤  Artists", "m:ar")],
@@ -382,7 +382,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
         if cached:
             msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0], song_key=key)
         else:
-            tmp = tempfile.mkdtemp(prefix="spotigram_pick_")
+            tmp = tempfile.mkdtemp(prefix="telspot_pick_")
             try:
                 track = {"artist": tr["artist"], "title": tr["title"], "duration": tr["duration"]}
                 async with dl_lock():

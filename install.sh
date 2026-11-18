@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Spotigram - installer & management menu
+# Tel Spot - installer & management menu
 # One-line install:
-#   curl -fsSL -o /tmp/spotigram-install.sh https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh && sudo bash /tmp/spotigram-install.sh
+#   curl -fsSL -o /tmp/telspot-install.sh https://raw.githubusercontent.com/amirebi9156/TelSpot/main/install.sh && sudo bash /tmp/telspot-install.sh
 # (as root you can drop sudo; do not use "sudo bash <(curl ...)", sudo closes the <(...) pipe)
-# After install, just run:  sudo spotigram
+# After install, just run:  sudo telspot
 set -u
 
-APP_DIR="${SPOTIGRAM_DIR:-/opt/spotigram}"
-REPO_URL="${SPOTIGRAM_REPO:-https://github.com/amirebi9156/spotigram.git}"
-BRANCH="${SPOTIGRAM_BRANCH:-main}"
-SERVICE="spotigram"
+APP_DIR="${TELSPOT_DIR:-${SPOTIGRAM_DIR:-/opt/telspot}}"
+REPO_URL="${TELSPOT_REPO:-${SPOTIGRAM_REPO:-https://github.com/amirebi9156/TelSpot.git}}"
+BRANCH="${TELSPOT_BRANCH:-${SPOTIGRAM_BRANCH:-main}}"
+SERVICE="telspot"
 UNIT="/etc/systemd/system/${SERVICE}.service"
 ENV_FILE="$APP_DIR/.env"
 PL_FILE="$APP_DIR/playlists.txt"
 VENV="$APP_DIR/venv"
-CLI="/usr/local/bin/spotigram"
+CLI="/usr/local/bin/telspot"
+LEGACY_DIR="/opt/spotigram"          # the project used to be called Spotigram
+LEGACY_SERVICE="spotigram"
+LEGACY_CLI="/usr/local/bin/spotigram"
 
 RED=$'\e[31m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; CYAN=$'\e[36m'; BOLD=$'\e[1m'; NC=$'\e[0m'
 ok()   { echo -e "${GREEN}✔${NC} $*"; }
@@ -243,7 +246,7 @@ setup_venv() {
 write_service() {
   cat > "$UNIT" <<EOF
 [Unit]
-Description=Spotigram - Spotify playlists to Telegram topics
+Description=Tel Spot - Spotify playlists to Telegram topics
 After=network-online.target
 Wants=network-online.target
 
@@ -311,7 +314,7 @@ do_install() {
   sleep 2
   health_check
   echo
-  ok "Done. Manage anytime with:  ${BOLD}sudo spotigram${NC}"
+  ok "Done. Manage anytime with:  ${BOLD}sudo telspot${NC}"
 }
 
 do_update() {
@@ -442,7 +445,7 @@ health_check() {
 }
 
 do_uninstall() {
-  yes_no "Remove the Spotigram service?" n || return 0
+  yes_no "Remove the Tel Spot service?" n || return 0
   systemctl disable --now "$SERVICE" >/dev/null 2>&1
   rm -f "$UNIT" "$CLI"
   systemctl daemon-reload
@@ -455,6 +458,30 @@ do_uninstall() {
   fi
 }
 
+# ------------------------------------------------------- migrate from Spotigram
+migrate_legacy() {
+  [ "$APP_DIR" = "/opt/telspot" ] || return 0
+  [ -d "$LEGACY_DIR/.git" ] && [ ! -e "$APP_DIR" ] || return 0
+  info "Found an old Spotigram install. Moving it to Tel Spot (settings, playlists, artists and history are kept)..."
+  systemctl stop "$LEGACY_SERVICE" >/dev/null 2>&1
+  systemctl disable "$LEGACY_SERVICE" >/dev/null 2>&1
+  rm -f "/etc/systemd/system/${LEGACY_SERVICE}.service"
+  mv "$LEGACY_DIR" "$APP_DIR" || { err "Could not move $LEGACY_DIR"; return 1; }
+  rm -rf "$VENV"   # a virtualenv cannot be moved, it is rebuilt below
+  git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+  fetch_code || return 1
+  setup_venv || return 1
+  write_service
+  ln -sf "$APP_DIR/install.sh" "$LEGACY_CLI"   # the old command "spotigram" keeps working
+  systemctl enable --now "$SERVICE" >/dev/null 2>&1
+  sleep 2
+  ok "Migrated. The command is now:  ${BOLD}sudo telspot${NC}  (old name still works)"
+  echo
+  warn "If you created a NEW bot (@TelSpot_bot): menu -> Edit settings -> BOT_TOKEN, then restart."
+  warn "Add the new bot to the group as admin (Manage Topics, Delete/Pin messages)."
+  echo
+}
+
 # --------------------------------------------------------------------- menu
 svc_state() {
   if [ ! -f "$UNIT" ]; then echo "${RED}not installed${NC}"
@@ -465,12 +492,12 @@ svc_state() {
 menu_loop() {
   local c
   if ! is_installed; then
-    echo -e "${BOLD}Spotigram is not installed.${NC}"
+    echo -e "${BOLD}Tel Spot is not installed.${NC}"
     yes_no "Install now?" y && { do_install; pause; }
   fi
   while true; do
     clear
-    echo -e "${BOLD}${CYAN}Spotigram${NC} - Spotify playlists -> Telegram topics"
+    echo -e "${BOLD}${CYAN}Tel Spot${NC} - Spotify playlists -> Telegram topics"
     echo -e "Status: $(svc_state)"
     echo
     echo " 1) Install / reinstall"
@@ -514,6 +541,7 @@ menu_loop() {
 
 main() {
   need_root
+  migrate_legacy
   case "${1:-menu}" in
     install)  do_install;;
     update)   do_update;;
@@ -529,3 +557,4 @@ main() {
 }
 
 main "$@"
+exit $?

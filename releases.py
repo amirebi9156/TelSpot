@@ -3,7 +3,7 @@ New-release monitor: watches artists on YouTube (channel RSS) and SoundCloud (yt
 sends each new track to one Telegram topic as soon as ANY platform shows it first.
 Spotify is intentionally not used (it is usually the slowest and has no public feed).
 
-Artists live in artists.txt, one per line (managed from the menu: `spotigram artists`):
+Artists live in artists.txt, one per line (managed from the menu: `telspot artists`):
     Kendrick Lamar | yt:UC... | yt:UC... | sc:kendrick-lamar-official  # notes
 """
 from __future__ import annotations
@@ -88,7 +88,7 @@ def drop_source(name: str, platform: str, sid: str) -> None:
 
 
 def write_artists(artists: list[Artist]) -> None:
-    lines = ["# Spotigram artists: Name | yt:<channel id> | sc:<soundcloud name>   (edit with: spotigram artists)"]
+    lines = ["# Tel Spot artists: Name | yt:<channel id> | sc:<soundcloud name>   (edit with: telspot artists)"]
     for a in artists:
         parts = [a.name] + [f"yt:{c}" for c in a.yt] + [f"sc:{s}" for s in a.sc]
         line = " | ".join(parts)
@@ -250,7 +250,7 @@ async def send_release(
     bot: Bot, session: aiohttp.ClientSession, artist: Artist, item: dict, info: dict, title: str
 ) -> None:
     fmt = AUDIO_FMT_YT if item["platform"] == "yt" else AUDIO_FMT_SC
-    tmp = tempfile.mkdtemp(prefix="spotigram_rel_")
+    tmp = tempfile.mkdtemp(prefix="telspot_rel_")
     try:
         async with dl_lock():
             path, dinfo = await asyncio.to_thread(download_url, item["url"], tmp, fmt)

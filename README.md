@@ -1,4 +1,4 @@
-# Spotigram
+# Tel Spot
 
 Your music, in Telegram. One private supergroup with Topics, and a light bot (single process, no ffmpeg, SQLite state) that does three things:
 
@@ -35,10 +35,12 @@ Search shows matching artists and songs (metadata from Deezer's public API). Tap
 ## One-line install
 
 ```bash
-curl -fsSL -o /tmp/spotigram-install.sh https://raw.githubusercontent.com/amirebi9156/spotigram/main/install.sh && sudo bash /tmp/spotigram-install.sh
+curl -fsSL -o /tmp/telspot-install.sh https://raw.githubusercontent.com/amirebi9156/TelSpot/main/install.sh && sudo bash /tmp/telspot-install.sh
 ```
 
-Afterwards open the management menu any time with `sudo spotigram`. It covers install, update, settings, playlists, artists, start/stop/restart, health check, live logs, statistics, retrying failed tracks, yt-dlp update and uninstall. Most actions also work as commands: `spotigram status`, `spotigram logs`, `spotigram playlists`, `spotigram artists`, `spotigram update`, ...
+Afterwards open the management menu any time with `sudo telspot`. It covers install, update, settings, playlists, artists, start/stop/restart, health check, live logs, statistics, retrying failed tracks, yt-dlp update and uninstall. Most actions also work as commands: `telspot status`, `telspot logs`, `telspot playlists`, `telspot artists`, `telspot update`, ...
+
+> **Renamed from Spotigram.** If you have the old version installed, run the one-line install below once: it moves `/opt/spotigram` to `/opt/telspot`, keeps your settings, playlists, artists and history, and renames the service and the command (`sudo telspot`; the old `spotigram` command keeps working). If you switched to a new bot, put its token in *Edit settings* and make it admin of the group.
 
 ## Before you install
 
@@ -52,16 +54,16 @@ Afterwards open the management menu any time with `sudo spotigram`. It covers in
 - **Playlists**: every cycle the bot reads each playlist's embed page and compares it with the database. New tracks are matched on YouTube by name and duration, downloaded as m4a with `yt-dlp` and sent into the playlist's topic. Telegram `file_id`s are reused when a track is in several playlists.
 - **New releases**: YouTube channel RSS feeds and SoundCloud profiles are checked every 3 minutes. The first time an artist is added, existing uploads are only recorded, so nothing old is sent. A new upload is ignored if it looks like a teaser/snippet/live/interview, is shorter than 1 or longer than 12 minutes, or is older than 72 hours. Songs are identified by a normalized "artist + title", so `Artist - Song (Official Video)` and `Song` are the same release.
 - **Lyrics**: long lyrics are sent as a `.txt` file.
-- Everything is stored in `/opt/spotigram` (`.env`, `playlists.txt`, `artists.txt`, `state.db`). The two lists are re-read every cycle, so edits need no restart.
+- Everything is stored in `/opt/telspot` (`.env`, `playlists.txt`, `artists.txt`, `state.db`). The two lists are re-read every cycle, so edits need no restart.
 
 ## Limits
 
 - Only **Public** playlists work, and Spotify's embed page exposes the **first 100 tracks** of a playlist. For longer ones, move already-delivered tracks to another playlist (the bot never deletes anything from Telegram) or split the playlist.
-- This relies on unofficial page formats, so Spotify, YouTube or SoundCloud changes can break it. `spotigram update` and *Update yt-dlp* fix most cases.
+- This relies on unofficial page formats, so Spotify, YouTube or SoundCloud changes can break it. `telspot update` and *Update yt-dlp* fix most cases.
 - Release detection is as fast as the platforms' feeds (YouTube RSS can lag a few minutes). Spotify is not monitored.
 - Lyrics coverage depends on the community database; some songs (especially non-English) may not be found.
 
-## Config (`/opt/spotigram/.env`)
+## Config (`/opt/telspot/.env`)
 
 | Key | Meaning |
 | --- | --- |
