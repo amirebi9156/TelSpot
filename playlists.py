@@ -381,6 +381,8 @@ async def _sync_playlist(bot: Bot, pid: str, session: aiohttp.ClientSession) -> 
         try:
             mid = await send_track(bot, topic_id, t, session)
             db.execute("INSERT OR REPLACE INTO tracks VALUES (?,?,?)", (pid, t["id"], mid))
+            db.execute("INSERT OR REPLACE INTO audio_meta VALUES (?,?,?,?)",
+                       (f"sp:{t['id']}", t["artist"], t["title"], t["duration"]))
             db.execute("DELETE FROM failed WHERE playlist_id=? AND track_id=?", (pid, t["id"]))
             db.commit()
             log.info("sent: %s - %s", t["artist"], t["title"])

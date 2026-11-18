@@ -88,6 +88,7 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS attempts (item TEXT PRIMARY KEY, n INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS lyrics_cache (key TEXT PRIMARY KEY, text TEXT);
     CREATE TABLE IF NOT EXISTS audios (msg_id INTEGER PRIMARY KEY, key TEXT);
+    CREATE TABLE IF NOT EXISTS audio_meta (key TEXT PRIMARY KEY, artist TEXT, title TEXT, duration INTEGER);
     CREATE TABLE IF NOT EXISTS favs (key TEXT PRIMARY KEY, src_msg INTEGER, fav_msg INTEGER, uid INTEGER);
     CREATE TABLE IF NOT EXISTS picks (
         key TEXT PRIMARY KEY, dz_id INTEGER, artist TEXT, title TEXT, added_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -133,9 +134,11 @@ async def topic_id_for(bot: Bot, key: str, name: str, color: int | None = None, 
     return topic.message_thread_id
 
 
-def record_audio(msg_id: int, song_key: str) -> None:
+def record_audio(msg_id: int, song_key: str, artist: str = "", title: str = "", duration: int = 0) -> None:
     """Remember which song a group message holds (needed to react ❤️ -> Favorites)."""
     db.execute("INSERT OR REPLACE INTO audios VALUES (?, ?)", (msg_id, song_key))
+    if title:
+        db.execute("INSERT OR REPLACE INTO audio_meta VALUES (?,?,?,?)", (song_key, artist, title, int(duration or 0)))
     db.commit()
 
 
@@ -146,7 +149,8 @@ async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, aud
         try:
             msg = await tg_call(lambda: bot.send_audio(CHAT_ID, audio, message_thread_id=topic_id, **kw))
             if song_key:
-                record_audio(msg.message_id, song_key)
+                record_audio(msg.message_id, song_key, kw.get("performer") or "", kw.get("title") or "",
+                             kw.get("duration") or 0)
             return msg
         except TelegramBadRequest as e:
             if attempt == 1 and "thread" in str(e).lower():
