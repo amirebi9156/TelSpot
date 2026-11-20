@@ -87,13 +87,15 @@ configure() {
   local pairs=(
     "BOT_TOKEN|Telegram bot token (from @BotFather)"
     "CHAT_ID|Telegram supergroup id (starts with -100)"
+    "OWNER_ID|Your numeric Telegram id (owner; empty = claim later with /claim)"
+    "ACCESS_ANSWER|Secret answer new users must give (empty = no question)"
   )
   local p key label cur shown val
   for p in "${pairs[@]}"; do
     key="${p%%|*}"; label="${p#*|}"
     cur="$(get_env "$key")"
     shown="$cur"
-    case "$key" in *TOKEN) shown="$(mask "$cur")";; esac
+    case "$key" in *TOKEN|ACCESS_ANSWER) shown="$(mask "$cur")";; esac
     [ -z "$shown" ] && shown="empty"
     read -r -p "$label [$shown]: " val < /dev/tty
     [ -n "$val" ] && set_env "$key" "$val"
@@ -196,6 +198,11 @@ manage_artists() {
   is_installed || { err "Install first"; return 1; }
   touch "$APP_DIR/artists.txt"
   (cd "$APP_DIR" && "$VENV/bin/python" bot.py artists < /dev/tty)
+}
+
+show_users() {
+  is_installed || { err "Install first"; return 1; }
+  (cd "$APP_DIR" && "$VENV/bin/python" bot.py users)
 }
 
 # ------------------------------------------------------------ install parts
@@ -551,6 +558,7 @@ main() {
     start|stop|restart) svc "$1";;
     playlists) manage_playlists;;
     artists)  manage_artists;;
+    users)    show_users;;
     uninstall) do_uninstall;;
     menu|*)   menu_loop;;
   esac

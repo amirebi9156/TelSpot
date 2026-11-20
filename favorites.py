@@ -11,6 +11,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile, FSInputFile, MessageReactionUpdated, ReplyParameters
 
+import access
 import health
 import playlists
 from core import (
@@ -159,7 +160,7 @@ async def remove(bot: Bot, msg_id: int, uid: int) -> bool:
 
 @router.message_reaction(F.chat.id == CHAT_ID)
 async def on_reaction(ev: MessageReactionUpdated, bot: Bot) -> None:
-    if ev.user is None or ev.user.is_bot:
+    if ev.user is None or ev.user.is_bot or not access.verified(ev.user.id):
         return
     now, before = _hearts(ev.new_reaction), _hearts(ev.old_reaction)
     if now and not before:

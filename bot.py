@@ -5,6 +5,7 @@ Usage:
     python bot.py                    # run everything
     python bot.py info <link|id>     # check a playlist link (used by install.sh)
     python bot.py artists            # interactive artist manager (used by install.sh)
+    python bot.py users              # everybody who used the bot (id, username)
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 
+import access
 import favorites
 import lyrics
 import playlists
@@ -157,10 +159,12 @@ async def main() -> None:
         sys.exit("BOT_TOKEN and CHAT_ID must be set in .env")
     bot = Bot(BOT_TOKEN)
     dp = Dispatcher()
+    dp.include_router(access.router)  # first: unverified/blocked people never reach the rest
     dp.include_router(router)  # lyrics first, then the menu
     dp.include_router(ui.router)
     dp.include_router(favorites.router)
     await setup_identity(bot)
+    access.announce_claim()
     try:
         cmds = [
             BotCommand(command="menu", description="Open the menu"),
@@ -191,6 +195,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
     if cmd == "info" and len(sys.argv) > 2:
         sys.exit(asyncio.run(playlists.info(sys.argv[2])))
+    elif cmd == "users":
+        print(access.users_text())
     elif cmd == "artists":
         releases.artists_cli()
     else:

@@ -47,6 +47,9 @@ async def admin_ids(bot: Bot) -> list[int]:
     except Exception as e:
         log.warning("could not list admins: %s", e)
         ids = _admins[1]
+    from core import owner_id
+    if owner_id() and owner_id() not in ids:
+        ids = ids + [owner_id()]
     _admins = (time.time(), ids)
     return ids
 

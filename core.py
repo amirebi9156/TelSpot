@@ -32,6 +32,10 @@ def _env(name: str, default: str = "") -> str:
 
 
 BOT_TOKEN = _env("BOT_TOKEN")
+# --- access control: members must answer a secret question the first time (empty = no question)
+ACCESS_ANSWERS = [a.strip().lower().replace(" ", "") for a in _env("ACCESS_ANSWER").split(",") if a.strip()]
+ACCESS_QUESTION = _env("ACCESS_QUESTION", "🔐 Secret question: what is the codename of the creator of this project?")
+OWNER_ENV = int(_env("OWNER_ID", "0") or 0)  # your numeric Telegram id (or claim it with /claim)
 CHAT_ID = int(_env("CHAT_ID", "0") or 0)  # supergroup id, like -100123456789
 SYNC_INTERVAL = int(_env("SYNC_INTERVAL", "600"))  # playlist check interval, seconds
 YTDLP_COOKIES = _env("YTDLP_COOKIES")  # optional cookies.txt path
@@ -89,6 +93,9 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS lyrics_cache (key TEXT PRIMARY KEY, text TEXT);
     CREATE TABLE IF NOT EXISTS audios (msg_id INTEGER PRIMARY KEY, key TEXT);
     CREATE TABLE IF NOT EXISTS audio_meta (key TEXT PRIMARY KEY, artist TEXT, title TEXT, duration INTEGER);
+    CREATE TABLE IF NOT EXISTS users (
+        uid INTEGER PRIMARY KEY, username TEXT, name TEXT, first_seen INTEGER, last_seen INTEGER,
+        verified_at INTEGER, blocked INTEGER DEFAULT 0, fails INTEGER DEFAULT 0, locked_until INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS favs (key TEXT PRIMARY KEY, src_msg INTEGER, fav_msg INTEGER, uid INTEGER);
     CREATE TABLE IF NOT EXISTS picks (
         key TEXT PRIMARY KEY, dz_id INTEGER, artist TEXT, title TEXT, added_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -170,8 +177,20 @@ async def _status(bot: Bot, uid: int) -> str:
         return "left"
 
 
+def owner_id() -> int:
+    """The owner: OWNER_ID from .env, or the id claimed with /claim (stored in the database)."""
+    if OWNER_ENV:
+        return OWNER_ENV
+    row = db.execute("SELECT value FROM meta WHERE key='owner_id'").fetchone()
+    return int(row[0]) if row else 0
+
+
+def is_owner(uid: int) -> bool:
+    return bool(uid) and uid == owner_id()
+
+
 async def is_admin(bot: Bot, uid: int) -> bool:
-    return uid == ANON_ADMIN_ID or await _status(bot, uid) in ("creator", "administrator")
+    return is_owner(uid) or uid == ANON_ADMIN_ID or await _status(bot, uid) in ("creator", "administrator")
 
 
 async def can_use(bot: Bot, chat, uid: int) -> bool:

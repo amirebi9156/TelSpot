@@ -22,6 +22,7 @@ Works in the group and in a private chat with the bot (DM only for members of th
 | `/search name` | Search a song or artist (DM: just type the name) |
 | `/playlists`, `/addplaylist link` | List / add playlists (DM: paste a Spotify link). Admins only for add/remove |
 | `/artists` | Artists you follow for new releases |
+| `/users` | Owner only: ids, usernames, block / unblock / revoke |
 | `/status` | Health, failed songs, connection check, **Retry failed** (admins) |
 | `/favorites` | Link to the Favorites topic and how many songs are in it |
 | `/lyrics` | Lyrics (sent to you privately): reply to a song, or `/lyrics Artist - Title`, or in private just send the name / music file |
@@ -31,6 +32,13 @@ Search takes a song, an artist, or **a line of lyrics you remember** (3+ words; 
 **Alerts**: when something keeps failing (YouTube blocking the server, 5 failed downloads in a row, a Spotify playlist that is no longer Public, a broken artist source) group admins get a message with a suggested fix, and another when it recovers. Admins must press /start in a private chat with the bot to receive them by DM; otherwise they are posted in the group.
 
 **Persian / non-Latin names**: when Deezer has little or nothing, search also lists YouTube results directly (▶️) and offers to follow the typed name.
+
+## Access control and owner
+
+- **Secret question**: set `ACCESS_ANSWER` in the settings (several answers allowed, comma separated; case and spaces are ignored). Anybody using the bot for the first time, in private or in the group, must answer the question (`ACCESS_QUESTION`) in a private chat with the bot. 5 wrong answers lock the user for 15 minutes. Empty `ACCESS_ANSWER` = no question. The answer lives only in your server's `.env`, never in the repo.
+- **Users list**: every person who touches the bot is recorded with numeric id, username and name. See them with `sudo telspot users` on the server, or `/users` in the bot (owner only; you can block, unblock or revoke people there).
+- **Owner**: put your numeric Telegram id in `OWNER_ID` (get it from @userinfobot), or leave it empty: at start the bot prints a one-time code in the log (`sudo telspot logs`), and sending `/claim CODE` to the bot in private makes you the owner. Only someone who can read the server log can claim. The owner counts as admin everywhere and receives alerts and new-user notices.
+- Being verified does not add anyone to the group: membership of the music group is still required.
 
 ## One-line install
 
@@ -73,6 +81,7 @@ Afterwards open the management menu any time with `sudo telspot`. It covers inst
 | `RELEASE_INTERVAL` | Seconds between new-release checks (default 180) |
 | `RELEASES_TOPIC_NAME` | Name of the new-releases topic |
 | `PICKS_TOPIC_NAME` | Name of the topic for songs added from search |
+| `ACCESS_ANSWER`, `ACCESS_QUESTION`, `OWNER_ID` | Secret question for new users, and the owner's id (see Access control) |
 | `FAV_TOPIC_NAME`, `FAV_EMOJIS` | Favorites topic name; reactions that count as a like (default `❤`, e.g. `❤,🔥`) |
 | `RELEASE_MAX_AGE_HOURS`, `RELEASE_MIN_SECONDS`, `RELEASE_MAX_SECONDS` | Release filters |
 | `YTDLP_COOKIES` | Optional cookies.txt path if YouTube blocks the server |
