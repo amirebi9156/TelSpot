@@ -26,7 +26,7 @@ Works in the group and in a private chat with the bot (DM only for members of th
 | `/favorites` | Link to the Favorites topic and how many songs are in it |
 | `/lyrics` | Lyrics (sent to you privately): reply to a song, or `/lyrics Artist - Title`, or in private just send the name / music file |
 
-Search shows matching artists and songs (metadata from Deezer's public API). Tap a song to add it to the `🎧 Picks` topic, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
+Search takes a song, an artist, or **a line of lyrics you remember** (3+ words; matched through Genius search). Every result has two buttons: tap the **title** to get the song in your private chat with the bot only, or tap **👥** to add it to the `🎧 Picks` topic of the group. Artist pages work the same way. Metadata comes from Deezer's public API. Open an artist for top songs and albums, or open an artist to see top songs and albums (add one song, a page, or a whole album), or tap **Follow** to pick their YouTube / SoundCloud sources; new songs then go to `🆕 New Releases` automatically. Adding playlists in bulk, following and removing are admin-only.
 
 **Alerts**: when something keeps failing (YouTube blocking the server, 5 failed downloads in a row, a Spotify playlist that is no longer Public, a broken artist source) group admins get a message with a suggested fix, and another when it recovers. Admins must press /start in a private chat with the bot to receive them by DM; otherwise they are posted in the group.
 

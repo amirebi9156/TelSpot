@@ -118,3 +118,32 @@ async def album(album_id: int) -> dict | None:
 async def track(track_id: int) -> dict | None:
     d = await _get(f"/track/{track_id}")
     return _track(d) if d else None
+
+
+async def search_by_lyrics(q: str, limit: int = 5) -> list[dict]:
+    """Find songs from a remembered line of lyrics (Genius public search, which also matches lyric text),
+    then match each hit to a Deezer track. Returns [] if Genius is unreachable."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://genius.com/api/search/song", params={"q": q, "per_page": 8},
+                                   headers=HEADERS, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                data = await r.json(content_type=None)
+    except Exception as e:
+        log.warning("lyrics search failed: %s", e)
+        return []
+    hits = []
+    for sec in ((data or {}).get("response") or {}).get("sections") or []:
+        for h in sec.get("hits") or []:
+            res = h.get("result") or {}
+            if res.get("title") and (res.get("primary_artist") or {}).get("name"):
+                hits.append((res["primary_artist"]["name"], res["title"]))
+    out, seen = [], set()
+    for artist, title in hits[:limit + 2]:
+        found = await search_tracks(f"{artist} {title}", 1)
+        t = found[0] if found else None
+        if t and t["id"] not in seen:
+            seen.add(t["id"])
+            out.append(t)
+        if len(out) >= limit:
+            break
+    return out

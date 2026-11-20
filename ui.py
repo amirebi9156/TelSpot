@@ -16,7 +16,7 @@ import time
 
 import aiohttp
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     BufferedInputFile, CallbackQuery, ForceReply, FSInputFile, InlineKeyboardButton,
@@ -38,7 +38,7 @@ router = Router()
 PER_PAGE = 8
 MAX_ADD_ALL = 30
 PROMPT_PLAYLIST = "➕ Send a public Spotify playlist link (reply to this message)"
-PROMPT_SEARCH = "🔎 Send a song or artist name (reply to this message)"
+PROMPT_SEARCH = "🔎 Send a song name, an artist, or a line of lyrics you remember (reply to this message)"
 PROMPT_LYRICS = "📝 Send a song name, like: Artist - Title (reply to this message). You can also just send me the music file."
 PROMPTS = {PROMPT_PLAYLIST, PROMPT_SEARCH, PROMPT_LYRICS}
 LYR: dict[str, list[dict]] = {}  # token -> lyrics candidates
@@ -313,28 +313,45 @@ async def do_search(bot: Bot, m: Message, query: str) -> None:
             web = await asyncio.to_thread(web_song_search, query)
         except Exception as e:
             log.warning("web search failed: %s", e)
-    if not arts and not trks and not web:
+    if not arts and not trks and not web and not (len(query.split()) >= 3 and await music.search_by_lyrics(query)):
         await say(bot, m, f"Nothing found for <b>{esc(query)}</b>.", KB([[B("‹ Menu", "m:main")]]))
         return
-    remember(trks)
+    by_lyrics: list[dict] = []
+    if len(query.split()) >= 3:  # probably a remembered line of lyrics
+        by_lyrics = [t for t in await music.search_by_lyrics(query) if t["id"] not in {x["id"] for x in trks}]
+        if not by_lyrics and not trks:
+            try:
+                web = web or await asyncio.to_thread(web_song_search, query + " lyrics")
+            except Exception as e:
+                log.warning("web lyrics search failed: %s", e)
+    remember(trks + by_lyrics)
     rows = [[B(f"🎤  {cut(a['name'], 32)} · {a['fans']:,}", f"a:{a['id']}", style="primary")] for a in arts]
     rows += [
-        [B(f"＋  {cut(t['artist'] + ' — ' + t['title'], 42)} · {mmss(t['duration'])}", f"t:{t['id']}")]
+        song_row(f"▶️  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}")
         for t in trks
     ]
+    if by_lyrics:
+        rows += [song_row(f"🔤  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}")
+                 for t in by_lyrics]
     if web:
         for w in web:
             WEB[w["yt"]] = w
         if len(WEB) > 500:
             for k in list(WEB)[:250]:
                 WEB.pop(k, None)
-        rows += [[B(f"▶️  {cut(w['artist'] + ' — ' + w['title'], 40)} · {mmss(w['duration'])}", f"w:{w['yt']}")] for w in web]
+        rows += [song_row(f"🌐  {cut(w['artist'] + ' — ' + w['title'], 34)} · {mmss(w['duration'])}", f"w:{w['yt']}", f"wg:{w['yt']}") for w in web]
     if not arts and await is_admin(bot, m.from_user.id):
         token = secrets.token_hex(3)
         SEARCHQ[token] = query.strip()[:60]
         rows.append([B(f"⭐  Follow “{cut(query.strip(), 26)}” for new songs", f"fq:{token}", style="success")])
     rows.append([B("‹ Menu", "m:main")])
-    note = "\n<blockquote>▶️ = found on YouTube directly</blockquote>" if web else ""
+    notes = []
+    if by_lyrics:
+        notes.append("🔤 = matched by lyrics")
+    if web:
+        notes.append("🌐 = found on YouTube directly")
+    notes.append("Tap a title to get the song here · 👥 adds it to the group")
+    note = "\n<blockquote>" + "\n".join(notes) + "</blockquote>"
     await say(bot, m, f"🔎 <b>{esc(query)}</b>{note}", KB(rows))
 
 
@@ -349,13 +366,18 @@ def artist_screen(a: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, KB(rows)
 
 
+def song_row(label: str, send: str, group: str) -> list[InlineKeyboardButton]:
+    """Tap the title: get the song here. Tap 👥: add it to the group instead."""
+    return [B(label, send), B("👥", group)]
+
+
 def songs_page(title: str, tracks: list[dict], page: int, prefix: str, kind: str, ident: int,
                back: list[InlineKeyboardButton]) -> tuple[str, InlineKeyboardMarkup]:
     pages = max(1, math.ceil(len(tracks) / PER_PAGE))
     page = min(max(page, 0), pages - 1)
     chunk = tracks[page * PER_PAGE:(page + 1) * PER_PAGE]
     remember(chunk)
-    rows = [[B(f"＋  {cut(t['title'], 38)} · {mmss(t['duration'])}", f"t:{t['id']}")] for t in chunk]
+    rows = [song_row(f"▶️  {cut(t['title'], 32)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}") for t in chunk]
     if pages > 1:
         rows.append(nav(prefix, page, pages))
     rows.append([B("➕  All on this page", f"ap:{kind}:{ident}:{page}", style="success")])
@@ -415,6 +437,54 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
         return "fail", cut(str(e), 120)
     finally:
         _adding.discard(key)
+
+
+async def send_here(bot: Bot, tr: dict, chat_id: int, thread: int | None = None) -> None:
+    """Send the song to one chat only (the person's private chat). Nothing goes to the group."""
+    fkey = f"yt:{tr['yt']}" if tr.get("yt") else f"dz:{tr['id']}"
+    cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
+    if cached:
+        await tg_call(lambda: bot.send_audio(chat_id, cached[0], message_thread_id=thread))
+        return
+    tmp = tempfile.mkdtemp(prefix="telspot_here_")
+    try:
+        try:
+            async with dl_lock():
+                if tr.get("yt"):
+                    path = await asyncio.to_thread(playlists.download_video, tr["yt"], tmp)
+                else:
+                    path = await asyncio.to_thread(playlists.download_audio,
+                                                   {"artist": tr["artist"], "title": tr["title"], "duration": tr["duration"]}, tmp)
+        except Exception as e:
+            await health.fail(bot, "download", "Downloads keep failing (songs from the menu)", str(e), threshold=5)
+            raise
+        img = None
+        if tr.get("cover"):
+            async with aiohttp.ClientSession() as session:
+                img = await fetch_image(session, tr["cover"], max_bytes=200_000)
+        msg = await tg_call(lambda: bot.send_audio(
+            chat_id, FSInputFile(path), message_thread_id=thread, title=tr["title"], performer=tr["artist"],
+            duration=tr["duration"] or None, thumbnail=BufferedInputFile(img, "cover.jpg") if img else None))
+        db.execute("INSERT OR REPLACE INTO files VALUES (?, ?)", (fkey, msg.audio.file_id))
+        db.commit()
+        await health.ok(bot, "download", "downloads work again")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def send_here_task(bot: Bot, cb: CallbackQuery, tr: dict) -> None:
+    msg = cb.message
+    private = msg.chat.type == "private"
+    dest, thread = (msg.chat.id, None) if private else (cb.from_user.id, None)
+    try:
+        await send_here(bot, tr, dest, thread)
+    except TelegramForbiddenError:
+        await say(bot, msg, "Open me in private and press Start once, then tap the song again. "
+                  "Songs you only want for yourself are sent there.",
+                  KB([[B("📩  Open the bot", url=f"https://t.me/{(await bot.me()).username}?start=menu", style="primary")]]))
+    except Exception as e:
+        log.warning("send here failed: %s", e)
+        await say(bot, msg, f"❌ Could not get <b>{esc(tr['artist'])} — {esc(tr['title'])}</b>: {esc(cut(str(e), 120))}")
 
 
 async def add_songs_task(bot: Bot, ctx: Message, tracks: list[dict]) -> None:
@@ -578,7 +648,7 @@ async def on_private_text(m: Message, bot: Bot) -> None:
         await do_search(bot, m, m.text.strip())
 
 
-CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|w|lg|f|fq|fs|fo|fc|st|noop)(:|$)"
+CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|g|w|wg|lg|f|fq|fs|fo|fc|st|noop)(:|$)"
 
 
 @router.callback_query(ALLOWED_CB, F.data.regexp(CB_PATTERN))
@@ -705,6 +775,12 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         tr = TRK.get(int(p[1])) or await music.track(int(p[1]))
         if not tr:
             return await cb.answer("Song not found.", show_alert=True)
+        await cb.answer("⏳ Getting it for you…")
+        return spawn(send_here_task(bot, cb, tr))
+    if cmd == "g":
+        tr = TRK.get(int(p[1])) or await music.track(int(p[1]))
+        if not tr:
+            return await cb.answer("Song not found.", show_alert=True)
         await cb.answer("⏳ Adding… I'll tell you when it's in the group.")
         return spawn(add_songs_task(bot, msg, [tr]))
     if cmd == "ap":  # ap:<kind>:<id>:<page>   (page -1 = whole album)
@@ -740,12 +816,12 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         PENDING[token] = {"name": name, "cands": cands, "ts": time.time()}
         text, kb = follow_screen(token)
         return await edit(cb, text, kb)
-    if cmd == "w":
+    if cmd in ("w", "wg"):
         w = WEB.get(p[1])
         if not w:
             return await cb.answer("Search again, this result expired.", show_alert=True)
-        await cb.answer("⏳ Adding… I'll tell you when it's in the group.")
-        return spawn(add_songs_task(bot, msg, [w]))
+        await cb.answer("⏳ Getting it for you…" if cmd == "w" else "⏳ Adding… I'll tell you when it's in the group.")
+        return spawn(send_here_task(bot, cb, w) if cmd == "w" else add_songs_task(bot, msg, [w]))
     if cmd in ("fs", "fo", "fc"):
         st = PENDING.get(p[1])
         if not st:
