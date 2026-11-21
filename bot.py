@@ -119,25 +119,18 @@ async def on_reply_word(message: Message, bot: Bot) -> None:
         await lyrics_for_audio(bot, message.reply_to_message, message.from_user.id, gm)
 
 
-def _has_name(a) -> bool:
-    return bool(a.title or a.performer or " - " in (a.file_name or ""))
-
-
-@router.message(F.chat.type == "private", F.audio, F.audio.func(_has_name))
-async def on_private_audio(message: Message, bot: Bot) -> None:
-    """Send me a tagged music file in private and I find its lyrics."""
-    if not await can_use(bot, message.chat, message.from_user.id):
-        return
-    await lyrics_for_audio(bot, message, message.from_user.id)
-
-
-@router.message(F.chat.type == "private", F.voice | F.video_note | F.video | F.audio)
+@router.message(F.chat.type == "private", F.voice | F.video_note | F.video | F.audio | F.document)
 async def on_private_clip(message: Message, bot: Bot) -> None:
-    """A voice message / video / untagged audio: find out which song it is (Shazam-style)."""
+    """Voice, video, audio or an audio/video file sent as a document: identify the song (Shazam-style).
+    Tagged music files ask first: identify or lyrics."""
+    if not ui.clip_of(message):
+        return
     if not await can_use(bot, message.chat, message.from_user.id):
         return
-    await ui.recognize_clip(bot, message)
+    await ui.offer_clip(bot, message)
 
+
+ui.LYRICS_HOOK["audio"] = lyrics_for_audio
 
 PROFILE_VERSION = "telspot-1"  # bump to push a new name/description to Telegram on next start
 

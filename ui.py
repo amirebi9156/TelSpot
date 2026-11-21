@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import html
 import math
+import os
 import re
 import secrets
 import shutil
@@ -314,20 +315,53 @@ async def do_lyrics_search(bot: Bot, m: Message, query: str) -> None:
     await say(bot, m, f"📝 <b>{esc(query)}</b>\n<blockquote>Pick the song to get its lyrics.</blockquote>", KB(rows))
 
 
+def clip_of(m: Message):
+    """(file, suffix, duration) of whatever audio/video a message carries, else None."""
+    if m.voice:
+        return m.voice, ".ogg", m.voice.duration or 0
+    if m.video_note:
+        return m.video_note, ".mp4", m.video_note.duration or 0
+    if m.video:
+        return m.video, ".mp4", m.video.duration or 0
+    if m.audio:
+        ext = os.path.splitext(m.audio.file_name or "")[1] or ".mp3"
+        return m.audio, ext, m.audio.duration or 0
+    d = m.document
+    if d and ((d.mime_type or "").startswith(("audio/", "video/"))
+              or os.path.splitext(d.file_name or "")[1].lower() in AUDIO_EXTS):
+        return d, os.path.splitext(d.file_name or "")[1] or ".mp3", 0
+    return None
+
+
+LYRICS_HOOK: dict = {}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".flac", ".wma", ".mp4", ".mov", ".mkv", ".webm", ".avi"}
+
+
+async def offer_clip(bot: Bot, m: Message) -> None:
+    """A tagged music file: ask whether to identify it or fetch its lyrics. Anything else: identify."""
+    a = m.audio
+    if a and (a.title or a.performer or " - " in (a.file_name or "")):
+        return await tg_call(lambda: bot.send_message(
+            m.chat.id, "What do you want from this file?", reply_to_message_id=m.message_id,
+            reply_markup=KB([[B("🎶  Identify the song", "rc", style="primary"), B("📝  Lyrics", "rl")]])))
+    await recognize_clip(bot, m)
+
+
 async def recognize_clip(bot: Bot, m: Message) -> None:
-    """Identify the song in a voice message / video / audio clip, then offer it like a search result."""
+    """Identify the song in a voice message / video / audio file, then offer it like a search result."""
     import recognize
     why = recognize.missing()
     if why:
         log.warning("song recognition unavailable: %s", why)
         return await say(bot, m, "Song recognition is not set up on this server yet."
                          + (f"\n<code>missing: {esc(why)}</code>" if is_owner(m.from_user.id) else ""))
-    f = m.voice or m.video_note or m.video or m.audio
-    suffix = {"voice": ".ogg", "video_note": ".mp4", "video": ".mp4"}.get(
-        "voice" if m.voice else "video_note" if m.video_note else "video" if m.video else "", ".mp3")
+    found = clip_of(m)
+    if not found:
+        return await say(bot, m, "Send a voice message, a video or an audio file.")
+    f, suffix, duration = found
     wait = await say(bot, m, "🎧 Listening…")
     try:
-        hit = await recognize.identify(bot, f.file_id, getattr(f, "file_size", 0) or 0, suffix)
+        hit = await recognize.identify(bot, f.file_id, getattr(f, "file_size", 0) or 0, suffix, duration)
     except ValueError:
         hit, err = None, "That file is too big (max 20 MB). Send a shorter clip."
     except Exception as e:
@@ -813,7 +847,7 @@ async def on_private_text(m: Message, bot: Bot) -> None:
         await do_search(bot, m, m.text.strip())
 
 
-CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|g|w|wg|lg|f|fq|fs|fo|fc|st|sw|cfg|noop)(:|$)"
+CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|g|w|wg|lg|f|fq|fs|fo|fc|st|sw|cfg|rc|rl|noop)(:|$)"
 
 
 @router.callback_query(ALLOWED_CB, F.data.regexp(CB_PATTERN))
@@ -848,6 +882,14 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         text, kb = await main_menu(bot, ws_of(msg.chat, uid), uid, msg.chat.type == "private")
         return await edit(cb, text, kb)
 
+    if cmd in ("rc", "rl"):
+        src = msg.reply_to_message
+        if not src or not clip_of(src):
+            return await cb.answer("Send the file again.", show_alert=True)
+        await cb.answer()
+        if cmd == "rc":
+            return spawn(recognize_clip(bot, src))
+        return await LYRICS_HOOK["audio"](bot, src, uid)  # set by bot.py
     if cmd == "noop":
         return await cb.answer()
     if cmd == "m":

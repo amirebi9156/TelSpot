@@ -40,10 +40,10 @@ def available() -> bool:
     return missing() is None
 
 
-async def _to_wav(src: str, dst: str) -> bool:
+async def _to_wav(src: str, dst: str, start: int = 0) -> bool:
     """Mono 16 kHz wav of the loudest-looking part: skip 0 s, keep CLIP_SECONDS."""
     p = await asyncio.create_subprocess_exec(
-        ffmpeg() or "ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn", "-t", str(CLIP_SECONDS), "-ac", "1", "-ar", "16000", dst,
+        ffmpeg() or "ffmpeg", "-y", "-loglevel", "error", "-ss", str(start), "-i", src, "-vn", "-t", str(CLIP_SECONDS), "-ac", "1", "-ar", "16000", dst,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, err = await p.communicate()
     if p.returncode != 0:
@@ -59,25 +59,30 @@ def parse(result: dict | None) -> dict | None:
             "cover": (t.get("images") or {}).get("coverart")}
 
 
-async def identify_file(path: str) -> dict | None:
+async def identify_file(path: str, start: int = 0) -> dict | None:
     from shazamio import Shazam
     tmp = tempfile.mkdtemp(prefix="telspot_rec_")
     try:
         wav = os.path.join(tmp, "clip.wav")
-        if not await _to_wav(path, wav):
+        if not await _to_wav(path, wav, start):
             raise RuntimeError("could not read that audio")
         return parse(await asyncio.wait_for(Shazam().recognize(wav), 60))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def identify(bot, file_id: str, size: int = 0, suffix: str = ".ogg") -> dict | None:
+async def identify(bot, file_id: str, size: int = 0, suffix: str = ".ogg", duration: int = 0) -> dict | None:
     if size and size > MAX_BYTES:
         raise ValueError("too big")
     tmp = tempfile.mkdtemp(prefix="telspot_dl_")
     try:
         path = os.path.join(tmp, "in" + suffix)
         await bot.download(file_id, destination=path)
-        return await identify_file(path)
+        # full songs: skip the (often quiet) intro; short clips are used from the start
+        start = min(int(duration * 0.3), 75) if duration and duration > 90 else 0
+        hit = await identify_file(path, start)
+        if hit is None and start:
+            hit = await identify_file(path, 0)  # second chance from the very beginning
+        return hit
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
