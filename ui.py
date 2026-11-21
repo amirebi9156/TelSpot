@@ -317,8 +317,11 @@ async def do_lyrics_search(bot: Bot, m: Message, query: str) -> None:
 async def recognize_clip(bot: Bot, m: Message) -> None:
     """Identify the song in a voice message / video / audio clip, then offer it like a search result."""
     import recognize
-    if not recognize.available():
-        return await say(bot, m, "Song recognition is not installed on this server yet (owner: run <code>sudo telspot update</code>).")
+    why = recognize.missing()
+    if why:
+        log.warning("song recognition unavailable: %s", why)
+        return await say(bot, m, "Song recognition is not set up on this server yet."
+                         + (f"\n<code>missing: {esc(why)}</code>" if is_owner(m.from_user.id) else ""))
     f = m.voice or m.video_note or m.video or m.audio
     suffix = {"voice": ".ogg", "video_note": ".mp4", "video": ".mp4"}.get(
         "voice" if m.voice else "video_note" if m.video_note else "video" if m.video else "", ".mp3")

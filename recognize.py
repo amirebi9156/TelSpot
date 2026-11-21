@@ -13,12 +13,19 @@ CLIP_SECONDS = 25
 MAX_BYTES = 20 * 1024 * 1024  # Telegram bots can download up to 20 MB
 
 
-def available() -> bool:
+def missing() -> str | None:
+    """What is not installed (None = ready)."""
     try:
         import shazamio  # noqa: F401
-    except Exception:
-        return False
-    return shutil.which("ffmpeg") is not None
+    except Exception as e:
+        return f"python package shazamio ({type(e).__name__}: {str(e)[:120]})"
+    if shutil.which("ffmpeg") is None:
+        return "ffmpeg"
+    return None
+
+
+def available() -> bool:
+    return missing() is None
 
 
 async def _to_wav(src: str, dst: str) -> bool:
