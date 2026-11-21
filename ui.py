@@ -29,8 +29,9 @@ import music
 import playlists
 import releases
 from core import (
-    ALLOWED_CB, ALLOWED_MSG, CHAT_ID, PICKS_TOPIC_NAME, db, dl_lock, fetch_image, is_admin,
-    can_use, log, send_audio_topic, tg_call,
+    ALLOWED_CB, ALLOWED_MSG, CHAT_ID, MAIN_LINK, PICKS_TOPIC_NAME, USER_MAX_GROUPS, active_ws, can_manage, can_use, db,
+    dl_lock, fetch_image, is_owner, limits, log, require_join, scope_where, send_audio_topic, set_active_ws,
+    set_setting, sk, song_quota, tg_call, user_ws, ws_ids, ws_title,
 )
 
 router = Router()
@@ -71,8 +72,8 @@ def KB(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def topic_link(topic_id: int | None) -> str | None:
-    s = str(CHAT_ID)
+def topic_link(ws: int | None, topic_id: int | None) -> str | None:
+    s = str(ws or CHAT_ID)
     return f"https://t.me/c/{s[4:]}/{topic_id}" if topic_id and s.startswith("-100") else None
 
 
@@ -110,9 +111,21 @@ async def my_id(bot: Bot) -> int:
     return _bot_id
 
 
-def followed(name: str) -> bool:
+def followed(name: str, ws: int = CHAT_ID) -> bool:
     n = releases._norm(name)
-    return any(releases._norm(a.name) == n for a in releases.read_artists())
+    return any(releases._norm(a.name) == n for a in releases.read_artists(ws))
+
+
+def ws_of(chat, uid: int) -> int | None:
+    """Which group a menu works on: the group itself, or (in private) the person's own active group."""
+    if chat.type != "private":
+        return chat.id if chat.id in ws_ids() else None
+    return active_ws(uid)
+
+
+async def connect_url(bot: Bot) -> str:
+    me = (await bot.me()).username
+    return f"https://t.me/{me}?startgroup=connect&admin=manage_topics+delete_messages+pin_messages+invite_users"
 
 
 def nav(prefix: str, page: int, pages: int) -> list[InlineKeyboardButton]:
@@ -137,27 +150,66 @@ def remember(tracks: list[dict]) -> None:
 
 
 # ----------------------------------------------------------------- screens
-def main_menu() -> tuple[str, InlineKeyboardMarkup]:
-    return (
-        "🎧 <b>Tel Spot</b>\n<blockquote>Your music, in Telegram.</blockquote>",
-        KB([
-            [B("🔎  Search songs & artists", "m:se", style="primary")],
-            [B("🎵  Playlists", "m:pl"), B("🎤  Artists", "m:ar")],
-            [B("❤️  Favorites", "m:fv"), B("📝  Lyrics", "m:ly")],
-            [B("📊  Status", "m:st")],
-        ]),
-    )
+async def main_menu(bot: Bot, ws: int | None, uid: int, private: bool) -> tuple[str, InlineKeyboardMarkup]:
+    rows = [[B("🔎  Search songs & artists", "m:se", style="primary")]]
+    if ws:
+        rows += [[B("🎵  Playlists", "m:pl"), B("🎤  Artists", "m:ar")],
+                 [B("❤️  Favorites", "m:fv"), B("📝  Lyrics", "m:ly")],
+                 [B("📊  Status", "m:st")]]
+        text = "🎧 <b>Tel Spot</b>\n<blockquote>Your music, in Telegram.</blockquote>"
+        if private:
+            text += f"\n📁 Group: <b>{esc(ws_title(ws))}</b>"
+    else:
+        rows.append([B("📝  Lyrics", "m:ly")])
+        rows.append([B("➕  Connect my own group", url=await connect_url(bot), style="success")])
+        text = ("🎧 <b>Tel Spot</b>\n<blockquote>Find songs and lyrics right here. Want your own playlists, "
+                "new-release alerts and favorites? Connect a group of yours (a supergroup with Topics).</blockquote>")
+    if private and not is_owner(uid) and MAIN_LINK["url"]:
+        rows.append([B("⭐  Recommended group", url=MAIN_LINK["url"])])
+    if private and ws is not None and len(user_ws(uid)) > 1:
+        rows.append([B("🔁  My groups", "m:sw")])
+    elif private and ws is None:
+        pass
+    if private and ws is not None and not is_owner(uid) and len(user_ws(uid)) < USER_MAX_GROUPS:
+        rows.append([B("➕  Connect another group", url=await connect_url(bot))])
+    if private and is_owner(uid):
+        rows.append([B("⚙️  Settings", "m:cf")])
+    return text, KB(rows)
 
 
-def playlists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
-    rows = playlists.playlist_overview()
+def switch_screen(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    cur = active_ws(uid)
+    rows = [[B(f"{'✅' if w == cur else '📁'}  {cut(ws_title(w), 36)}", f"sw:{w}")] for w in user_ws(uid)]
+    rows.append([B("‹ Menu", "m:main")])
+    return "🔁 <b>My groups</b>\n<blockquote>Pick the group the menu works on.</blockquote>", KB(rows)
+
+
+def settings_screen() -> tuple[str, InlineKeyboardMarkup]:
+    rj = require_join()
+    n_ws = len(ws_ids()) - 1
+    n_users = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    text = ("⚙️ <b>Settings</b>\n"
+            f"<blockquote>Joining your main group is <b>{'mandatory' if rj else 'optional'}</b>.\n"
+            "Mandatory: people who have not joined it cannot use the bot at all.\n"
+            "Optional: anyone can use it; the group is only recommended.</blockquote>\n"
+            f"👥 {n_users} users · 📁 {n_ws} connected group(s)")
+    if rj and not MAIN_LINK["url"]:
+        text += "\n⚠️ No invite link for the main group yet (set MAIN_GROUP_LINK or give the bot the invite right)."
+    return text, KB([[B("🔓  Make it optional" if rj else "🔒  Make it mandatory", "cfg:rj", style="primary")],
+                     [B("‹ Menu", "m:main")]])
+
+
+def playlists_screen(admin: bool, ws: int = CHAT_ID) -> tuple[str, InlineKeyboardMarkup]:
+    rows = playlists.playlist_overview(ws)
     lines = ["🎵 <b>Playlists</b>", "<blockquote>Each playlist is a topic in the group.</blockquote>"]
     if not rows:
         lines.append("Nothing here yet.")
     for r in rows:
-        link = topic_link(r["topic_id"])
+        link = topic_link(ws, r["topic_id"])
         name = esc(r["name"])
         lines.append(f"▫️ {f'<a href=\"{link}\">{name}</a>' if link else name} · {r['tracks']}")
+    if admin and ws != CHAT_ID:
+        lines.append(f"<i>{len(rows)}/{limits(ws)[0]} playlists</i>")
     kb_rows = [[B("➕  Add playlist", "pl:add", style="success")]] if admin else []
     if admin:
         for r in rows:
@@ -166,14 +218,14 @@ def playlists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), KB(kb_rows)
 
 
-def artists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
-    arts = releases.read_artists()
+def artists_screen(admin: bool, ws: int = CHAT_ID) -> tuple[str, InlineKeyboardMarkup]:
+    arts = releases.read_artists(ws)
     lines = ["🎤 <b>Followed artists</b>", "<blockquote>New songs land in the 🆕 New Releases topic.</blockquote>"]
     if not arts:
         lines.append("Nobody yet. Search an artist and tap Follow.")
     for a in arts:
         lines.append(f"▫️ {esc(a.name)} · YT {len(a.yt)} · SC {len(a.sc)}")
-    kb_rows = [[B("⭐  Find & follow an artist", "m:se", style="success")]]
+    kb_rows = [[B("⭐  Find & follow an artist", "m:se", style="success")]] if admin else []
     if admin:
         for a in arts:
             kb_rows.append([B(f"✖  {cut(a.name, 32)}", f"ar:rm:{releases.artist_hash(a.name)}", style="danger")])
@@ -181,9 +233,9 @@ def artists_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), KB(kb_rows)
 
 
-def favorites_screen() -> tuple[str, InlineKeyboardMarkup]:
-    link = topic_link(favorites.topic_id())
-    n = favorites.count()
+def favorites_screen(ws: int = CHAT_ID) -> tuple[str, InlineKeyboardMarkup]:
+    link = topic_link(ws, favorites.topic_id(ws))
+    n = favorites.count(ws)
     text = ("❤️ <b>Favorites</b>\n<blockquote>React with ❤️ to any song in the group and it is copied into the "
             "Favorites topic. Remove the heart to remove it again.</blockquote>\n"
             f"{n} song(s) so far" + (f" · <a href=\"{link}\">open topic</a>" if link else ""))
@@ -197,21 +249,23 @@ def ago(ts: float | None) -> str:
     return f"{s}s ago" if s < 90 else f"{s // 60} min ago" if s < 5400 else f"{s // 3600} h ago"
 
 
-def status_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
-    q = lambda sql: db.execute(sql).fetchone()[0]
-    failed = q(f"SELECT COUNT(*) FROM failed WHERE attempts >= {playlists.MAX_ATTEMPTS}")
+def status_screen(admin: bool, ws: int = CHAT_ID) -> tuple[str, InlineKeyboardMarkup]:
+    def q(table: str, col: str, extra: str = "") -> int:
+        cond, args = scope_where(ws, col)
+        return db.execute(f"SELECT COUNT(*) FROM {table} WHERE {cond} {extra}", args).fetchone()[0]
+    failed = q("failed", "playlist_id", f"AND attempts >= {playlists.MAX_ATTEMPTS}")
     bad = health.failing()
     lines = [
         "📊 <b>Status</b>",
         f"<blockquote>Playlists checked {ago(health.LAST_OK.get('playlists'))}\n"
         f"Releases checked {ago(health.LAST_OK.get('releases'))}\n"
         f"Running for {ago(health.START).replace(' ago', '')}</blockquote>",
-        f"🎵 {len(playlists.read_playlist_ids())} playlists · {q('SELECT COUNT(*) FROM tracks')} songs sent",
-        f"🎤 {len(releases.read_artists())} artists · {q('SELECT COUNT(*) FROM releases')} new releases sent",
-        f"🎧 {q('SELECT COUNT(*) FROM picks')} songs added from search",
+        f"🎵 {len(playlists.read_playlist_ids(ws))} playlists · {q('tracks', 'playlist_id')} songs sent",
+        f"🎤 {len(releases.read_artists(ws))} artists · {q('releases', 'key')} new releases sent",
+        f"🎧 {q('picks', 'key')} songs added from search",
     ]
     lines.append(f"{'⚠️' if failed else '✅'} {failed} songs gave up after repeated failures")
-    if bad:
+    if bad and is_owner_view(admin, ws):
         lines.append("⚠️ Having trouble: " + ", ".join(f"{esc(k.split(':', 1)[-1])} ×{v}" for k, v in list(bad.items())[:5]))
     for ts, what in list(health.RECENT)[:3]:
         lines.append(f"🕘 {ago(ts)}: {esc(what)}")
@@ -220,6 +274,10 @@ def status_screen(admin: bool) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([B(f"🔁  Retry failed ({failed})", "st:retry", style="primary")])
     rows.append([B("‹ Menu", "m:main")])
     return "\n".join(lines), KB(rows)
+
+
+def is_owner_view(admin: bool, ws: int) -> bool:
+    return admin and ws == CHAT_ID  # server-wide problems are only shown for the owner's group
 
 
 def help_text() -> str:
@@ -305,6 +363,9 @@ def is_non_latin(s: str) -> bool:
 
 
 async def do_search(bot: Bot, m: Message, query: str) -> None:
+    uid = m.from_user.id
+    ws = ws_of(m.chat, uid)
+    manage = bool(ws) and await can_manage(bot, ws, uid)
     arts, trks = await asyncio.gather(music.search_artists(query, 4), music.search_tracks(query, 8))
     web: list[dict] = []
     # Deezer is weak for many Persian / non-Latin names: also look on YouTube directly
@@ -327,11 +388,11 @@ async def do_search(bot: Bot, m: Message, query: str) -> None:
     remember(trks + by_lyrics)
     rows = [[B(f"🎤  {cut(a['name'], 32)} · {a['fans']:,}", f"a:{a['id']}", style="primary")] for a in arts]
     rows += [
-        song_row(f"▶️  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}")
+        song_row(f"▶️  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}", manage)
         for t in trks
     ]
     if by_lyrics:
-        rows += [song_row(f"🔤  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}")
+        rows += [song_row(f"🔤  {cut(t['artist'] + ' — ' + t['title'], 36)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}", manage)
                  for t in by_lyrics]
     if web:
         for w in web:
@@ -339,8 +400,8 @@ async def do_search(bot: Bot, m: Message, query: str) -> None:
         if len(WEB) > 500:
             for k in list(WEB)[:250]:
                 WEB.pop(k, None)
-        rows += [song_row(f"🌐  {cut(w['artist'] + ' — ' + w['title'], 34)} · {mmss(w['duration'])}", f"w:{w['yt']}", f"wg:{w['yt']}") for w in web]
-    if not arts and await is_admin(bot, m.from_user.id):
+        rows += [song_row(f"🌐  {cut(w['artist'] + ' — ' + w['title'], 34)} · {mmss(w['duration'])}", f"w:{w['yt']}", f"wg:{w['yt']}", manage) for w in web]
+    if not arts and manage:
         token = secrets.token_hex(3)
         SEARCHQ[token] = query.strip()[:60]
         rows.append([B(f"⭐  Follow “{cut(query.strip(), 26)}” for new songs", f"fq:{token}", style="success")])
@@ -350,59 +411,63 @@ async def do_search(bot: Bot, m: Message, query: str) -> None:
         notes.append("🔤 = matched by lyrics")
     if web:
         notes.append("🌐 = found on YouTube directly")
-    notes.append("Tap a title to get the song here · 👥 adds it to the group")
+    notes.append("Tap a title to get the song here" + (" · 👥 adds it to the group" if manage else ""))
     note = "\n<blockquote>" + "\n".join(notes) + "</blockquote>"
     await say(bot, m, f"🔎 <b>{esc(query)}</b>{note}", KB(rows))
 
 
-def artist_screen(a: dict) -> tuple[str, InlineKeyboardMarkup]:
+def artist_screen(a: dict, ws: int | None = None, manage: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     text = f"🎤 <b>{esc(a['name'])}</b>\n<blockquote>{a['fans']:,} fans · {a['albums']} albums</blockquote>"
-    rows = [
-        [B("✅  Following" if followed(a["name"]) else "⭐  Follow · auto-send new songs",
-           "noop" if followed(a["name"]) else f"f:{a['id']}", style=None if followed(a["name"]) else "success")],
-        [B("🎵  Top songs", f"at:{a['id']}:0"), B("💿  Albums", f"ab:{a['id']}:0")],
-        [B("‹ Menu", "m:main")],
-    ]
+    rows = []
+    if manage and ws:
+        fol = followed(a["name"], ws)
+        rows.append([B("✅  Following" if fol else "⭐  Follow · auto-send new songs",
+                       "noop" if fol else f"f:{a['id']}", style=None if fol else "success")])
+    rows += [[B("🎵  Top songs", f"at:{a['id']}:0"), B("💿  Albums", f"ab:{a['id']}:0")],
+             [B("‹ Menu", "m:main")]]
     return text, KB(rows)
 
 
-def song_row(label: str, send: str, group: str) -> list[InlineKeyboardButton]:
-    """Tap the title: get the song here. Tap 👥: add it to the group instead."""
-    return [B(label, send), B("👥", group)]
+def song_row(label: str, send: str, group: str, manage: bool = True) -> list[InlineKeyboardButton]:
+    """Tap the title: get the song here. Tap 👥 (group managers only): add it to the group instead."""
+    return [B(label, send), B("👥", group)] if manage else [B(label, send)]
 
 
 def songs_page(title: str, tracks: list[dict], page: int, prefix: str, kind: str, ident: int,
-               back: list[InlineKeyboardButton]) -> tuple[str, InlineKeyboardMarkup]:
+               back: list[InlineKeyboardButton], manage: bool = True) -> tuple[str, InlineKeyboardMarkup]:
     pages = max(1, math.ceil(len(tracks) / PER_PAGE))
     page = min(max(page, 0), pages - 1)
     chunk = tracks[page * PER_PAGE:(page + 1) * PER_PAGE]
     remember(chunk)
-    rows = [song_row(f"▶️  {cut(t['title'], 32)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}") for t in chunk]
+    rows = [song_row(f"▶️  {cut(t['title'], 32)} · {mmss(t['duration'])}", f"t:{t['id']}", f"g:{t['id']}", manage) for t in chunk]
     if pages > 1:
         rows.append(nav(prefix, page, pages))
-    rows.append([B("➕  All on this page", f"ap:{kind}:{ident}:{page}", style="success")])
-    if kind == "al":
-        rows.append([B(f"➕  Whole album ({len(tracks)})", f"ap:{kind}:{ident}:-1", style="success")])
+    if manage:
+        rows.append([B("➕  All on this page", f"ap:{kind}:{ident}:{page}", style="success")])
+        if kind == "al":
+            rows.append([B(f"➕  Whole album ({len(tracks)})", f"ap:{kind}:{ident}:-1", style="success")])
     rows.append(back + [B("‹ Menu", "m:main")])
-    return f"{title}\n<blockquote>Tap a song to add it to the group.</blockquote>", KB(rows)
+    hint = "Tap a song to get it here · 👥 adds it to the group." if manage else "Tap a song to get it here."
+    return f"{title}\n<blockquote>{hint}</blockquote>", KB(rows)
 
 
 # ------------------------------------------------------------ adding songs
-async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
+async def add_song(bot: Bot, tr: dict, ws: int = CHAT_ID) -> tuple[str, str]:
     """Returns ('ok'|'dup'|'fail', detail)."""
     key = releases.release_key(tr["artist"], tr["title"])
     fkey = f"yt:{tr['yt']}" if tr.get("yt") else f"dz:{tr['id']}"
-    if db.execute("SELECT 1 FROM picks WHERE key=?", (key,)).fetchone():
+    skey = sk(ws, key)
+    if db.execute("SELECT 1 FROM picks WHERE key=?", (skey,)).fetchone():
         return "dup", PICKS_TOPIC_NAME
-    if db.execute("SELECT 1 FROM releases WHERE key=?", (key,)).fetchone():
+    if db.execute("SELECT 1 FROM releases WHERE key=?", (skey,)).fetchone():
         return "dup", releases.RELEASES_TOPIC_NAME
-    if key in _adding:
+    if skey in _adding:
         return "dup", "already being added"
-    _adding.add(key)
+    _adding.add(skey)
     try:
         cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
         if cached:
-            msg = await send_audio_topic(bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0], song_key=key)
+            msg = await send_audio_topic(bot, ws, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, cached[0], song_key=key)
         else:
             tmp = tempfile.mkdtemp(prefix="telspot_pick_")
             try:
@@ -417,7 +482,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
                     async with aiohttp.ClientSession() as session:
                         img = await fetch_image(session, tr["cover"], max_bytes=200_000)
                 msg = await send_audio_topic(
-                    bot, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, FSInputFile(path), song_key=key,
+                    bot, ws, "picks_topic", PICKS_TOPIC_NAME, 0xFFD67E, FSInputFile(path), song_key=key,
                     title=tr["title"], performer=tr["artist"], duration=tr["duration"] or None,
                     thumbnail=BufferedInputFile(img, "cover.jpg") if img else None
                 )
@@ -426,7 +491,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
                 shutil.rmtree(tmp, ignore_errors=True)
         db.execute(
             "INSERT OR REPLACE INTO picks (key, dz_id, artist, title) VALUES (?,?,?,?)",
-            (key, tr.get("id") or 0, tr["artist"], tr["title"]),
+            (skey, tr.get("id") or 0, tr["artist"], tr["title"]),
         )
         db.commit()
         await health.ok(bot, "download", "downloads work again")
@@ -436,7 +501,7 @@ async def add_song(bot: Bot, tr: dict) -> tuple[str, str]:
         await health.fail(bot, "download", "Downloads keep failing (songs added from the menu)", str(e), threshold=5)
         return "fail", cut(str(e), 120)
     finally:
-        _adding.discard(key)
+        _adding.discard(skey)
 
 
 async def send_here(bot: Bot, tr: dict, chat_id: int, thread: int | None = None) -> None:
@@ -476,6 +541,8 @@ async def send_here_task(bot: Bot, cb: CallbackQuery, tr: dict) -> None:
     msg = cb.message
     private = msg.chat.type == "private"
     dest, thread = (msg.chat.id, None) if private else (cb.from_user.id, None)
+    if not song_quota(cb.from_user.id):
+        return await say(bot, msg, "⏳ You reached the hourly song limit. Try again a bit later.")
     try:
         await send_here(bot, tr, dest, thread)
     except TelegramForbiddenError:
@@ -487,16 +554,16 @@ async def send_here_task(bot: Bot, cb: CallbackQuery, tr: dict) -> None:
         await say(bot, msg, f"❌ Could not get <b>{esc(tr['artist'])} — {esc(tr['title'])}</b>: {esc(cut(str(e), 120))}")
 
 
-async def add_songs_task(bot: Bot, ctx: Message, tracks: list[dict]) -> None:
+async def add_songs_task(bot: Bot, ctx: Message, tracks: list[dict], ws: int = CHAT_ID) -> None:
     ok = dup = fail = 0
     last = ("", "")
     for tr in tracks:
-        status, detail = await add_song(bot, tr)
+        status, detail = await add_song(bot, tr, ws)
         ok, dup, fail = ok + (status == "ok"), dup + (status == "dup"), fail + (status == "fail")
         last = (status, detail)
         if len(tracks) > 1:
             await asyncio.sleep(1.5)
-    where = "the group" if ctx.chat.id != CHAT_ID else "this group"
+    where = "this group" if ctx.chat.id == ws else "your group"
     if len(tracks) == 1:
         t = tracks[0]
         name = f"<b>{esc(t['artist'])} — {esc(t['title'])}</b>"
@@ -512,13 +579,17 @@ async def add_songs_task(bot: Bot, ctx: Message, tracks: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------- playlists
-async def add_playlist_from_text(bot: Bot, m: Message, text: str) -> None:
+async def add_playlist_from_text(bot: Bot, m: Message, text: str, ws: int = CHAT_ID) -> None:
     pid = playlists.parse_playlist_id(text)
     if not pid:
         await say(bot, m, "That does not look like a Spotify playlist link.")
         return
-    if pid in playlists.read_playlist_ids():
+    have = playlists.read_playlist_ids(ws)
+    if pid in have:
         await say(bot, m, "That playlist is already added.")
+        return
+    if len(have) >= limits(ws)[0]:
+        await say(bot, m, f"❌ This group already has {len(have)} playlists (the limit). Remove one first.")
         return
     try:
         async with aiohttp.ClientSession() as session:
@@ -526,7 +597,7 @@ async def add_playlist_from_text(bot: Bot, m: Message, text: str) -> None:
     except Exception as e:
         await say(bot, m, f"❌ Could not read it: {esc(str(e))}\nMake sure the playlist is <b>Public</b>.")
         return
-    playlists.add_playlist_id(pid, data["name"])
+    playlists.add_playlist_id(ws, pid, data["name"])
     note = "\n⚠️ Only the first ~100 songs of a playlist can be read." if len(data["tracks"]) >= 100 else ""
     await say(bot, m, f"✅ Added <b>{esc(data['name'])}</b> ({len(data['tracks'])} songs). "
                       f"Sending it to its own topic now…{note}")
@@ -534,7 +605,7 @@ async def add_playlist_from_text(bot: Bot, m: Message, text: str) -> None:
     async def run() -> None:
         async with aiohttp.ClientSession() as session:
             try:
-                await playlists.sync_playlist(bot, pid, session)
+                await playlists.sync_playlist(bot, ws, pid, session)
             except Exception as e:
                 log.error("sync after add failed for %s: %s", pid, e)
     spawn(run())
@@ -542,21 +613,42 @@ async def add_playlist_from_text(bot: Bot, m: Message, text: str) -> None:
 
 # ----------------------------------------------------------------- handlers
 async def deny(m: Message, bot: Bot) -> None:
-    await say(bot, m, "Only members of the music group can use me. Join the group first.")
+    rows = [[B("⭐  Join the group first", url=MAIN_LINK["url"], style="primary")]] if MAIN_LINK["url"] else []
+    await say(bot, m, "To use me, first join the creator's music group.", KB(rows) if rows else None)
 
 
-async def need_admin(bot: Bot, uid: int) -> bool:
-    return await is_admin(bot, uid)
+async def ctx(bot: Bot, chat, uid: int) -> tuple[int | None, bool]:
+    """(group the menu works on, may this person change it?)"""
+    ws = ws_of(chat, uid)
+    return ws, bool(ws) and await can_manage(bot, ws, uid)
+
+
+async def show_menu(bot: Bot, m: Message, uid: int, note: str = "") -> None:
+    ws = ws_of(m.chat, uid)
+    text, kb = await main_menu(bot, ws, uid, m.chat.type == "private")
+    await say(bot, m, text + note, kb)
+
+
+async def no_group(bot: Bot, m: Message) -> None:
+    await say(bot, m, "📁 You have no group connected yet. Add me to your own supergroup (with Topics) to use this.",
+              KB([[B("➕  Connect my own group", url=await connect_url(bot), style="success")]]))
+
+
+async def no_rights(bot: Bot, m: Message, ws: int | None) -> None:
+    if ws == CHAT_ID:
+        return await say(bot, m, "This is the creator's group: only the creator manages it. "
+                                 "Connect your own group to use your own playlists.")
+    await say(bot, m, "Only the group owner or its admins can change this.")
 
 
 @router.message(ALLOWED_MSG, Command("menu", "start", "help"))
 async def cmd_menu(m: Message, command: CommandObject, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    if m.chat.type == "private" and (command.args or "").strip() == "lyrics":
+    arg = (command.args or "").strip()
+    if m.chat.type == "private" and arg == "lyrics":
         return await ask_lyrics(bot, m)
-    text, kb = main_menu()
-    await say(bot, m, text + "\n\n" + help_text(), kb)
+    await show_menu(bot, m, m.from_user.id, "\n\n" + help_text())
 
 
 @router.message(ALLOWED_MSG, Command("search", "s", "artist", "follow"))
@@ -575,7 +667,10 @@ async def cmd_search(m: Message, command: CommandObject, bot: Bot) -> None:
 async def cmd_playlists(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    text, kb = playlists_screen(await need_admin(bot, m.from_user.id))
+    ws, manage = await ctx(bot, m.chat, m.from_user.id)
+    if not ws:
+        return await no_group(bot, m)
+    text, kb = playlists_screen(manage, ws)
     await say(bot, m, text, kb)
 
 
@@ -583,7 +678,10 @@ async def cmd_playlists(m: Message, bot: Bot) -> None:
 async def cmd_favorites(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    text, kb = favorites_screen()
+    ws, _ = await ctx(bot, m.chat, m.from_user.id)
+    if not ws:
+        return await no_group(bot, m)
+    text, kb = favorites_screen(ws)
     await say(bot, m, text, kb)
 
 
@@ -591,7 +689,10 @@ async def cmd_favorites(m: Message, bot: Bot) -> None:
 async def cmd_status(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    text, kb = status_screen(await need_admin(bot, m.from_user.id))
+    ws, manage = await ctx(bot, m.chat, m.from_user.id)
+    if not ws:
+        return await no_group(bot, m)
+    text, kb = status_screen(manage, ws)
     await say(bot, m, text, kb)
 
 
@@ -599,7 +700,28 @@ async def cmd_status(m: Message, bot: Bot) -> None:
 async def cmd_artists(m: Message, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    text, kb = artists_screen(await need_admin(bot, m.from_user.id))
+    ws, manage = await ctx(bot, m.chat, m.from_user.id)
+    if not ws:
+        return await no_group(bot, m)
+    text, kb = artists_screen(manage, ws)
+    await say(bot, m, text, kb)
+
+
+@router.message(F.chat.type == "private", Command("settings"))
+async def cmd_settings(m: Message, bot: Bot) -> None:
+    if not is_owner(m.from_user.id):
+        return
+    text, kb = settings_screen()
+    await say(bot, m, text, kb)
+
+
+@router.message(F.chat.type == "private", Command("groups", "mygroups"))
+async def cmd_groups(m: Message, bot: Bot) -> None:
+    if not await can_use(bot, m.chat, m.from_user.id):
+        return await deny(m, bot)
+    if not user_ws(m.from_user.id):
+        return await no_group(bot, m)
+    text, kb = switch_screen(m.from_user.id)
     await say(bot, m, text, kb)
 
 
@@ -607,10 +729,13 @@ async def cmd_artists(m: Message, bot: Bot) -> None:
 async def cmd_addplaylist(m: Message, command: CommandObject, bot: Bot) -> None:
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
-    if not await need_admin(bot, m.from_user.id):
-        return await say(bot, m, "Only group admins can add playlists.")
+    ws, manage = await ctx(bot, m.chat, m.from_user.id)
+    if not ws:
+        return await no_group(bot, m)
+    if not manage:
+        return await no_rights(bot, m, ws)
     if command.args:
-        await add_playlist_from_text(bot, m, command.args)
+        await add_playlist_from_text(bot, m, command.args, ws)
     else:
         await tg_call(lambda: bot.send_message(m.chat.id, PROMPT_PLAYLIST, message_thread_id=_thread(m),
                                                reply_markup=ForceReply(selective=True)))
@@ -628,27 +753,31 @@ async def on_prompt_reply(m: Message, bot: Bot) -> None:
     if m.reply_to_message.text == PROMPT_LYRICS:
         return await do_lyrics_search(bot, m, m.text)
     if m.reply_to_message.text == PROMPT_PLAYLIST:
-        if not await need_admin(bot, m.from_user.id):
-            return await say(bot, m, "Only group admins can add playlists.")
-        await add_playlist_from_text(bot, m, m.text)
+        ws, manage = await ctx(bot, m.chat, m.from_user.id)
+        if not manage:
+            return await no_rights(bot, m, ws)
+        await add_playlist_from_text(bot, m, m.text, ws)
     else:
         await do_search(bot, m, m.text.strip())
 
 
 @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
 async def on_private_text(m: Message, bot: Bot) -> None:
-    """In a private chat: a playlist link adds the playlist, anything else is a search."""
+    """In a private chat: a playlist link adds the playlist to your group, anything else is a search."""
     if not await can_use(bot, m.chat, m.from_user.id):
         return await deny(m, bot)
     if playlists.parse_playlist_id(m.text):
-        if not await need_admin(bot, m.from_user.id):
-            return await say(bot, m, "Only group admins can add playlists.")
-        await add_playlist_from_text(bot, m, m.text)
+        ws, manage = await ctx(bot, m.chat, m.from_user.id)
+        if not ws:
+            return await no_group(bot, m)
+        if not manage:
+            return await no_rights(bot, m, ws)
+        await add_playlist_from_text(bot, m, m.text, ws)
     else:
         await do_search(bot, m, m.text.strip())
 
 
-CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|g|w|wg|lg|f|fq|fs|fo|fc|st|noop)(:|$)"
+CB_PATTERN = r"^(m|pl|ar|a|at|ab|al|ap|t|g|w|wg|lg|f|fq|fs|fo|fc|st|sw|cfg|noop)(:|$)"
 
 
 @router.callback_query(ALLOWED_CB, F.data.regexp(CB_PATTERN))
@@ -658,12 +787,30 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         return await cb.answer()
     uid = cb.from_user.id
     if not await can_use(bot, msg.chat, uid):
-        return await cb.answer("Join the music group first.", show_alert=True)
+        return await cb.answer("Join the creator's group first.", show_alert=True)
     p = (cb.data or "").split(":")
-    cmd = p[0] if len(p) == 1 or p[0] not in ("pl", "ar", "st") else f"{p[0]}:{p[1]}"
-    ADMIN_ONLY = {"pl:add", "pl:rm", "ar:rm", "st:retry", "f", "fq", "fs", "fo", "ap"}
-    if cmd in ADMIN_ONLY and not await need_admin(bot, uid):
-        return await cb.answer("Only group admins can do that.", show_alert=True)
+    cmd = p[0] if len(p) == 1 or p[0] not in ("pl", "ar", "st", "cfg") else f"{p[0]}:{p[1]}"
+    ws, manage = await ctx(bot, msg.chat, uid)
+    ADMIN_ONLY = {"pl:add", "pl:rm", "ar:rm", "st:retry", "f", "fq", "fs", "fo", "ap", "g", "wg"}
+    if cmd in ADMIN_ONLY and not manage:
+        return await cb.answer("Only the group owner or admins can do that." if ws else "Connect your own group first.",
+                               show_alert=True)
+    if cmd.startswith("cfg") or (cmd == "m" and len(p) > 1 and p[1] == "cf"):
+        if not is_owner(uid):
+            return await cb.answer("Only the owner can do that.", show_alert=True)
+        if cmd == "cfg:rj":
+            set_setting("require_join", "0" if require_join() else "1")
+            await cb.answer("Saved")
+        else:
+            await cb.answer()
+        text, kb = settings_screen()
+        return await edit(cb, text, kb)
+    if cmd == "sw":
+        if int(p[1]) in user_ws(uid):
+            set_active_ws(uid, int(p[1]))
+        await cb.answer("Switched")
+        text, kb = await main_menu(bot, ws_of(msg.chat, uid), uid, msg.chat.type == "private")
+        return await edit(cb, text, kb)
 
     if cmd == "noop":
         return await cb.answer()
@@ -671,16 +818,21 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         await cb.answer()
         what = p[1]
         if what == "main":
-            text, kb = main_menu()
+            text, kb = await main_menu(bot, ws, uid, msg.chat.type == "private")
             return await edit(cb, text, kb)
+        if what == "sw":
+            text, kb = switch_screen(uid)
+            return await edit(cb, text, kb)
+        if what in ("fv", "pl", "ar", "st") and not ws:
+            return await no_group(bot, msg)
         if what == "fv":
-            text, kb = favorites_screen()
+            text, kb = favorites_screen(ws)
             return await edit(cb, text, kb)
         if what == "pl":
-            text, kb = playlists_screen(await need_admin(bot, uid))
+            text, kb = playlists_screen(manage, ws)
             return await edit(cb, text, kb)
         if what == "ar":
-            text, kb = artists_screen(await need_admin(bot, uid))
+            text, kb = artists_screen(manage, ws)
             return await edit(cb, text, kb)
         if what == "ly":
             if msg.chat.type == "private":
@@ -689,7 +841,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             return await edit(cb, help_text(), KB([[B("📩  Open the bot for lyrics", url=link, style="primary")],
                                                    [B("‹ Menu", "m:main")]]))
         if what == "st":
-            text, kb = status_screen(await need_admin(bot, uid))
+            text, kb = status_screen(manage, ws)
             return await edit(cb, text, kb)
         if what == "se":
             return await tg_call(lambda: bot.send_message(
@@ -707,36 +859,37 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             log.warning("lyrics delivery failed: %s", e)
             return
     if cmd == "st:retry":
-        n = db.execute("SELECT COUNT(*) FROM failed").fetchone()[0]
-        db.execute("DELETE FROM failed")
+        cond, args = scope_where(ws, "playlist_id")
+        n = db.execute(f"SELECT COUNT(*) FROM failed WHERE {cond}", args).fetchone()[0]
+        db.execute(f"DELETE FROM failed WHERE {cond}", args)
         db.commit()
         await cb.answer(f"🔁 Retrying {n} song(s)…")
 
         async def again() -> None:
             await playlists.sync_all(bot)
         spawn(again())
-        text, kb = status_screen(True)
+        text, kb = status_screen(True, ws)
         return await edit(cb, text, kb)
     if cmd == "st:check":
         await cb.answer("🩺 Checking…")
         await edit(cb, "🩺 Checking connections…")
         results = await check_connections()
-        text, kb = status_screen(await need_admin(bot, uid))
+        text, kb = status_screen(manage, ws)
         return await edit(cb, "🩺 <b>Connections</b>\n" + "\n".join(results) + "\n\n" + text, kb)
     if cmd == "pl:add":
         await cb.answer()
         return await tg_call(lambda: bot.send_message(
             msg.chat.id, PROMPT_PLAYLIST, message_thread_id=_thread(msg), reply_markup=ForceReply()))
     if cmd == "pl:rm":
-        playlists.remove_playlist_id(p[2])
+        playlists.remove_playlist_id(ws, p[2])
         await cb.answer("Removed. Songs already in Telegram stay.")
-        text, kb = playlists_screen(True)
+        text, kb = playlists_screen(True, ws)
         return await edit(cb, text, kb)
     if cmd == "ar:rm":
-        arts = [a for a in releases.read_artists() if releases.artist_hash(a.name) != p[2]]
-        releases.write_artists(arts)
+        arts = [a for a in releases.read_artists(ws) if releases.artist_hash(a.name) != p[2]]
+        releases.write_artists(arts, ws)
         await cb.answer("Unfollowed.")
-        text, kb = artists_screen(True)
+        text, kb = artists_screen(True, ws)
         return await edit(cb, text, kb)
 
     if cmd == "a":
@@ -744,7 +897,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if not a:
             return await cb.answer("Artist not found.", show_alert=True)
         await cb.answer()
-        text, kb = artist_screen(a)
+        text, kb = artist_screen(a, ws, manage)
         return await edit(cb, text, kb)
     if cmd in ("at", "ab", "al"):
         await cb.answer()
@@ -752,7 +905,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if cmd == "at":
             a, tracks = await music.artist(ident), await music.artist_top(ident)
             title = f"🎵 <b>{esc(a['name'] if a else '')}</b> — top songs"
-            text, kb = songs_page(title, tracks, page, f"at:{ident}", "at", ident, [B("‹ Artist", f"a:{ident}")])
+            text, kb = songs_page(title, tracks, page, f"at:{ident}", "at", ident, [B("‹ Artist", f"a:{ident}")], manage)
             return await edit(cb, text, kb)
         if cmd == "ab":
             a, albums = await music.artist(ident), await music.artist_albums(ident)
@@ -769,7 +922,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
             return await cb.answer("Album not found.", show_alert=True)
         title = f"💿 <b>{esc(al['title'])}</b> ({al['year']}) — {esc(al['artist'])}"
         back = [B("‹ Albums", f"ab:{al['artist_id']}:0")] if al.get("artist_id") else []
-        text, kb = songs_page(title, al["tracks"], page, f"al:{ident}", "al", ident, back)
+        text, kb = songs_page(title, al["tracks"], page, f"al:{ident}", "al", ident, back, manage)
         return await edit(cb, text, kb)
     if cmd == "t":
         tr = TRK.get(int(p[1])) or await music.track(int(p[1]))
@@ -782,7 +935,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if not tr:
             return await cb.answer("Song not found.", show_alert=True)
         await cb.answer("⏳ Adding… I'll tell you when it's in the group.")
-        return spawn(add_songs_task(bot, msg, [tr]))
+        return spawn(add_songs_task(bot, msg, [tr], ws))
     if cmd == "ap":  # ap:<kind>:<id>:<page>   (page -1 = whole album)
         kind, ident, page = p[1], int(p[2]), int(p[3])
         if kind == "at":
@@ -796,7 +949,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if not tracks:
             return await cb.answer("Nothing to add.", show_alert=True)
         await cb.answer(f"⏳ Adding {len(tracks)} songs…")
-        return spawn(add_songs_task(bot, msg, tracks))
+        return spawn(add_songs_task(bot, msg, tracks, ws))
 
     # ---- follow an artist: pick where to watch, then save
     if cmd in ("f", "fq"):
@@ -821,7 +974,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if not w:
             return await cb.answer("Search again, this result expired.", show_alert=True)
         await cb.answer("⏳ Getting it for you…" if cmd == "w" else "⏳ Adding… I'll tell you when it's in the group.")
-        return spawn(send_here_task(bot, cb, w) if cmd == "w" else add_songs_task(bot, msg, [w]))
+        return spawn(send_here_task(bot, cb, w) if cmd == "w" else add_songs_task(bot, msg, [w], ws))
     if cmd in ("fs", "fo", "fc"):
         st = PENDING.get(p[1])
         if not st:
@@ -829,7 +982,7 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         if cmd == "fc":
             PENDING.pop(p[1], None)
             await cb.answer("Cancelled.")
-            text, kb = main_menu()
+            text, kb = await main_menu(bot, ws, uid, msg.chat.type == "private")
             return await edit(cb, text, kb)
         if cmd == "fs":
             c = st["cands"][int(p[2])]
@@ -840,7 +993,10 @@ async def on_callback(cb: CallbackQuery, bot: Bot) -> None:
         picks = [(c["platform"], c["id"], c["label"]) for c in st["cands"] if c["on"]]
         if not picks:
             return await cb.answer("Select at least one source.", show_alert=True)
-        releases.add_artist(releases.read_artists(), st["name"], picks, save=True)
+        arts = releases.read_artists(ws)
+        if len(arts) >= limits(ws)[1] and not followed(st["name"], ws):
+            return await cb.answer(f"Limit reached: {limits(ws)[1]} artists per group.", show_alert=True)
+        releases.add_artist(arts, st["name"], picks, save=True, chat_id=ws)
         PENDING.pop(p[1], None)
         await cb.answer("Saved!")
         return await edit(

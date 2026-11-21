@@ -23,12 +23,12 @@ from urllib.parse import urlparse
 import aiohttp
 import yt_dlp
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import BufferedInputFile, FSInputFile
 
 import health
 from core import (
-    ARTISTS_FILE, AUDIO_FMT_SC, AUDIO_FMT_YT, CHAT_ID, HEADERS, RELEASE_INTERVAL,
+    artists_file, ws_ids, ws_owner, ws_title, sk, AUDIO_FMT_SC, AUDIO_FMT_YT, CHAT_ID, HEADERS, RELEASE_INTERVAL,
     RELEASE_MAX_AGE_HOURS, RELEASE_MAX_ATTEMPTS, RELEASE_MAX_SECONDS, RELEASE_MIN_SECONDS,
     RELEASES_TOPIC_NAME, db, dl_lock, download_url, fetch_image, log, send_audio_topic,
     topic_id_for, ytdlp_opts,
@@ -51,8 +51,8 @@ class Artist:
     note: str = ""
 
 
-def read_artists() -> list[Artist]:
-    p = Path(ARTISTS_FILE)
+def read_artists(chat_id: int = CHAT_ID) -> list[Artist]:
+    p = Path(artists_file(chat_id))
     if not p.exists():
         return []
     out: list[Artist] = []
@@ -77,17 +77,17 @@ def read_artists() -> list[Artist]:
     return out
 
 
-def drop_source(name: str, platform: str, sid: str) -> None:
-    arts = read_artists()
+def drop_source(name: str, platform: str, sid: str, chat_id: int = CHAT_ID) -> None:
+    arts = read_artists(chat_id)
     for a in arts:
         if a.name == name:
             lst = a.yt if platform == "yt" else a.sc
             if sid in lst:
                 lst.remove(sid)
-    write_artists([a for a in arts if a.yt or a.sc])
+    write_artists([a for a in arts if a.yt or a.sc], chat_id)
 
 
-def write_artists(artists: list[Artist]) -> None:
+def write_artists(artists: list[Artist], chat_id: int = CHAT_ID) -> None:
     lines = ["# Tel Spot artists: Name | yt:<channel id> | sc:<soundcloud name>   (edit with: telspot artists)"]
     for a in artists:
         parts = [a.name] + [f"yt:{c}" for c in a.yt] + [f"sc:{s}" for s in a.sc]
@@ -95,7 +95,7 @@ def write_artists(artists: list[Artist]) -> None:
         if a.note:
             line += f"  # {a.note}"
         lines.append(line)
-    Path(ARTISTS_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    Path(artists_file(chat_id)).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # --------------------------------------------------------- title handling
@@ -218,25 +218,26 @@ def reject_reason(item: dict, info: dict, now: datetime | None = None) -> str | 
 
 
 # ----------------------------------------------------------------- state
-def is_seen(iid: str) -> bool:
-    return db.execute("SELECT 1 FROM seen WHERE item=?", (iid,)).fetchone() is not None
+def is_seen(chat_id: int, iid: str) -> bool:
+    return db.execute("SELECT 1 FROM seen WHERE item=?", (sk(chat_id, iid),)).fetchone() is not None
 
 
-def mark_seen(iid: str) -> None:
-    db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (iid,))
-    db.execute("DELETE FROM attempts WHERE item=?", (iid,))
+def mark_seen(chat_id: int, iid: str) -> None:
+    db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (sk(chat_id, iid),))
+    db.execute("DELETE FROM attempts WHERE item=?", (sk(chat_id, iid),))
     db.commit()
 
 
-def bump_attempts(iid: str) -> int:
-    db.execute("INSERT OR IGNORE INTO attempts VALUES (?, 0)", (iid,))
-    db.execute("UPDATE attempts SET n = n + 1 WHERE item=?", (iid,))
+def bump_attempts(chat_id: int, iid: str) -> int:
+    k = sk(chat_id, iid)
+    db.execute("INSERT OR IGNORE INTO attempts VALUES (?, 0)", (k,))
+    db.execute("UPDATE attempts SET n = n + 1 WHERE item=?", (k,))
     db.commit()
-    return db.execute("SELECT n FROM attempts WHERE item=?", (iid,)).fetchone()[0]
+    return db.execute("SELECT n FROM attempts WHERE item=?", (k,)).fetchone()[0]
 
 
-async def ensure_releases_topic(bot: Bot, force_new: bool = False) -> int:
-    return await topic_id_for(bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, force_new)
+async def ensure_releases_topic(bot: Bot, chat_id: int = CHAT_ID, force_new: bool = False) -> int:
+    return await topic_id_for(bot, chat_id, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, force_new)
 
 
 def _thumb_url(item: dict, info: dict) -> str | None:
@@ -247,115 +248,159 @@ def _thumb_url(item: dict, info: dict) -> str | None:
 
 
 async def send_release(
-    bot: Bot, session: aiohttp.ClientSession, artist: Artist, item: dict, info: dict, title: str
+    bot: Bot, session: aiohttp.ClientSession, chat_id: int, artist: Artist, item: dict, info: dict, title: str
 ) -> None:
-    fmt = AUDIO_FMT_YT if item["platform"] == "yt" else AUDIO_FMT_SC
+    """Post one release in a group. The file is downloaded once; other groups reuse Telegram's file id."""
+    fkey = f"rel:{item['platform']}:{item['id']}"
+    song_key = release_key(artist.name, title)
+    caption = f"🆕 {artist.name} — {title}\n{PLATFORM_NAME[item['platform']]} · {item['url']}"
+    cached = db.execute("SELECT file_id FROM files WHERE track_id=?", (fkey,)).fetchone()
     tmp = tempfile.mkdtemp(prefix="telspot_rel_")
     try:
-        async with dl_lock():
-            path, dinfo = await asyncio.to_thread(download_url, item["url"], tmp, fmt)
-        turl = _thumb_url(item, dinfo)
-        img = await fetch_image(session, turl, max_bytes=200_000) if turl else None
-        thumb = BufferedInputFile(img, "thumb.jpg") if img else None
-        duration = int(dinfo.get("duration") or info.get("duration") or 0) or None
-        caption = f"🆕 {artist.name} — {title}\n{PLATFORM_NAME[item['platform']]} · {item['url']}"
-
-        await send_audio_topic(
-            bot, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, FSInputFile(path), title=title,
-            performer=artist.name, duration=duration, thumbnail=thumb, caption=caption,
-            song_key=release_key(artist.name, title)
-        )
+        if cached:
+            await send_audio_topic(bot, chat_id, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, cached[0],
+                                   song_key=song_key, title=title, performer=artist.name, caption=caption)
+        else:
+            fmt = AUDIO_FMT_YT if item["platform"] == "yt" else AUDIO_FMT_SC
+            async with dl_lock():
+                path, dinfo = await asyncio.to_thread(download_url, item["url"], tmp, fmt)
+            turl = _thumb_url(item, dinfo)
+            img = await fetch_image(session, turl, max_bytes=200_000) if turl else None
+            thumb = BufferedInputFile(img, "thumb.jpg") if img else None
+            duration = int(dinfo.get("duration") or info.get("duration") or 0) or None
+            msg = await send_audio_topic(
+                bot, chat_id, "releases_topic", RELEASES_TOPIC_NAME, 0xFB6F5F, FSInputFile(path), title=title,
+                performer=artist.name, duration=duration, thumbnail=thumb, caption=caption, song_key=song_key
+            )
+            db.execute("INSERT OR REPLACE INTO files VALUES (?, ?)", (fkey, msg.audio.file_id))
         db.execute(
             "INSERT OR REPLACE INTO releases (key, artist, title, platform, url) VALUES (?,?,?,?,?)",
-            (release_key(artist.name, title), artist.name, title, item["platform"], item["url"]),
+            (sk(chat_id, song_key), artist.name, title, item["platform"], item["url"]),
         )
         db.commit()
-        log.info("NEW RELEASE sent: %s - %s (%s)", artist.name, title, PLATFORM_NAME[item["platform"]])
+        log.info("NEW RELEASE sent to %s: %s - %s (%s)", chat_id, artist.name, title, PLATFORM_NAME[item["platform"]])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def process_item(bot: Bot, session: aiohttp.ClientSession, artist: Artist, item: dict) -> None:
+_info_cache: dict[str, dict] = {}
+
+
+async def item_info(url: str) -> dict:
+    if url not in _info_cache:
+        if len(_info_cache) > 200:
+            _info_cache.clear()
+        _info_cache[url] = await asyncio.to_thread(fetch_info_sync, url)
+    return _info_cache[url]
+
+
+async def process_item(bot: Bot, session: aiohttp.ClientSession, chat_id: int, artist: Artist, item: dict) -> None:
     iid = f"{item['platform']}:{item['id']}"
     try:
-        info = await asyncio.to_thread(fetch_info_sync, item["url"])
+        info = await item_info(item["url"])
         if info.get("live_status") in ("is_live", "is_upcoming"):
+            _info_cache.pop(item["url"], None)
             raise RuntimeError("live or premiere not started yet")
         reason = reject_reason(item, info)
         if reason:
             log.info("skip '%s' (%s): %s", item["title"], artist.name, reason)
-            mark_seen(iid)
+            mark_seen(chat_id, iid)
             return
         title = clean_title(info.get("title") or item["title"], artist.name) or item["title"]
         key = release_key(artist.name, title)
-        if db.execute("SELECT 1 FROM releases WHERE key=?", (key,)).fetchone():
+        if db.execute("SELECT 1 FROM releases WHERE key=?", (sk(chat_id, key),)).fetchone():
             log.info("duplicate, already sent from another platform: %s - %s", artist.name, title)
-            mark_seen(iid)
+            mark_seen(chat_id, iid)
             return
-        await send_release(bot, session, artist, item, info, title)
+        await send_release(bot, session, chat_id, artist, item, info, title)
         await health.ok(bot, "download", "downloads work again")
-        mark_seen(iid)
+        mark_seen(chat_id, iid)
         await asyncio.sleep(1)
+    except (TelegramForbiddenError, TelegramBadRequest) as e:
+        n = bump_attempts(chat_id, iid)
+        log.warning("release '%s' could not be posted in %s (%d/%d): %s", item["title"], chat_id, n, RELEASE_MAX_ATTEMPTS, e)
+        if chat_id != CHAT_ID and any(s in str(e).lower() for s in ("kicked", "chat not found", "forbidden", "not a member")):
+            from playlists import _group_gone
+            await _group_gone(bot, chat_id, e)
+        if n >= RELEASE_MAX_ATTEMPTS:
+            mark_seen(chat_id, iid)
     except Exception as e:
-        n = bump_attempts(iid)
+        n = bump_attempts(chat_id, iid)
         log.warning("release '%s' failed (%d/%d): %s", item["title"], n, RELEASE_MAX_ATTEMPTS, e)
         await health.fail(bot, "download", "Downloads keep failing (new releases)", str(e), threshold=5)
         if n >= RELEASE_MAX_ATTEMPTS:
-            mark_seen(iid)
+            mark_seen(chat_id, iid)
 
 
 # ------------------------------------------------------------------ loop
 async def release_cycle(bot: Bot, session: aiohttp.ClientSession) -> None:
-    artists = read_artists()
-    if not artists:
+    per_ws = {cid: read_artists(cid) for cid in ws_ids()}
+    per_ws = {cid: arts for cid, arts in per_ws.items() if arts}
+    if not per_ws:
         return
     sem = asyncio.Semaphore(4)
+    # every distinct source is fetched once, even if many groups follow the same artist
+    sources: dict[tuple[str, str], list] = {}
+    for cid, arts in per_ws.items():
+        for a in arts:
+            for sid in a.yt:
+                sources.setdefault(("yt", sid), [])
+            for sid in a.sc:
+                if sid not in ("tracks", "users"):
+                    sources.setdefault(("sc", sid), [])
+        for a in arts:  # earlier versions saved a wrong profile name "tracks"
+            if "tracks" in a.sc or "users" in a.sc:
+                drop_source(a.name, "sc", "tracks", cid); drop_source(a.name, "sc", "users", cid)
 
-    async def fetch(artist: Artist, platform: str, sid: str):
+    async def fetch(platform: str, sid: str):
         async with sem:
             try:
-                if platform == "yt":
-                    return artist, platform, sid, await fetch_yt(session, sid)
-                return artist, platform, sid, await asyncio.to_thread(fetch_sc_sync, sid)
+                items = await (fetch_yt(session, sid) if platform == "yt" else asyncio.to_thread(fetch_sc_sync, sid))
+                await health.ok(bot, f"src:{platform}:{sid}", f"{PLATFORM_NAME[platform]} source {sid} works again")
+                return platform, sid, items
             except Exception as e:
-                log.warning("%s %s (%s): %s", PLATFORM_NAME[platform], sid, artist.name, e)
+                log.warning("%s %s: %s", PLATFORM_NAME[platform], sid, e)
                 err = str(e)
                 if platform == "sc" and ("404" in err or "not found" in err.lower()):
-                    if await health.fail(bot, f"src:sc:{sid}", f"SoundCloud profile “{sid}” of {artist.name} does not exist", err, threshold=5):
-                        drop_source(artist.name, "sc", sid)
-                        await health.alert(bot, f"🧹 Removed the broken SoundCloud source “{sid}” for {artist.name}. Re-follow the artist from /search to add the right profile.")
+                    if await health.fail(bot, f"src:sc:{sid}", f"SoundCloud profile “{sid}” does not exist", err, threshold=5):
+                        for cid, arts in per_ws.items():
+                            for a in arts:
+                                if sid in a.sc:
+                                    drop_source(a.name, "sc", sid, cid)
+                                    await health.alert(bot, f"🧹 Removed the broken SoundCloud source “{sid}” of {a.name}. "
+                                                       "Follow the artist again from /search to add the right profile.",
+                                                       to=ws_owner(cid) or None)
                 else:
-                    await health.fail(bot, f"src:{platform}:{sid}", f"Cannot check {PLATFORM_NAME[platform]} source {sid} ({artist.name})", err, threshold=5)
-                return artist, platform, sid, None
+                    await health.fail(bot, f"src:{platform}:{sid}", f"Cannot check {PLATFORM_NAME[platform]} source {sid}", err, threshold=5)
+                return platform, sid, None
 
-    jobs = [fetch(a, "yt", c) for a in artists for c in a.yt]
-    jobs += [fetch(a, "sc", s) for a in artists for s in a.sc if s not in ("tracks", "users")]
-    for a in artists:  # earlier versions saved a wrong profile name "tracks"
-        if "tracks" in a.sc or "users" in a.sc:
-            drop_source(a.name, "sc", "tracks"); drop_source(a.name, "sc", "users")
-    results = await asyncio.gather(*jobs)
+    fetched = {(p, s): items for p, s, items in await asyncio.gather(*(fetch(p, s) for p, s in sources))}
 
-    candidates: list[tuple[Artist, dict]] = []
-    for artist, platform, sid, items in results:
-        if items is None:
-            continue
-        await health.ok(bot, f"src:{platform}:{sid}", f"{PLATFORM_NAME[platform]} source {sid} ({artist.name}) works again")
-        src = f"{platform}:{sid}"
-        if db.execute("SELECT 1 FROM source_state WHERE src=?", (src,)).fetchone() is None:
-            # first time we see this source: remember what exists, send nothing
-            for it in items:
-                db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (f"{it['platform']}:{it['id']}",))
-            db.execute("INSERT INTO source_state VALUES (?)", (src,))
-            db.commit()
-            log.info("watching %s on %s (%d existing uploads ignored)", artist.name, PLATFORM_NAME[platform], len(items))
-            continue
-        candidates += [(artist, it) for it in items if not is_seen(f"{it['platform']}:{it['id']}")]
+    candidates: list[tuple[int, Artist, dict]] = []
+    for cid, arts in per_ws.items():
+        for artist in arts:
+            for platform, sid in [("yt", s) for s in artist.yt] + [("sc", s) for s in artist.sc]:
+                items = fetched.get((platform, sid))
+                if items is None:
+                    continue
+                src = sk(cid, f"{platform}:{sid}")
+                if db.execute("SELECT 1 FROM source_state WHERE src=?", (src,)).fetchone() is None:
+                    # first time this group sees this source: remember what exists, send nothing
+                    for it in items:
+                        db.execute("INSERT OR IGNORE INTO seen VALUES (?)", (sk(cid, f"{it['platform']}:{it['id']}"),))
+                    db.execute("INSERT INTO source_state VALUES (?)", (src,))
+                    db.commit()
+                    log.info("watching %s on %s for %s (%d existing uploads ignored)", artist.name,
+                             PLATFORM_NAME[platform], cid, len(items))
+                    continue
+                candidates += [(cid, artist, it) for it in items if not is_seen(cid, f"{it['platform']}:{it['id']}")]
 
     health.mark_cycle("releases")
     far = datetime.max.replace(tzinfo=timezone.utc)
-    candidates.sort(key=lambda c: c[1]["published"] or far)  # oldest first
-    for artist, item in candidates:
-        await process_item(bot, session, artist, item)
+    candidates.sort(key=lambda c: c[2]["published"] or far)  # oldest first
+    for cid, artist, item in candidates:
+        if cid in ws_ids():  # a group may have been disconnected meanwhile
+            await process_item(bot, session, cid, artist, item)
 
 
 async def release_loop(bot: Bot) -> None:
@@ -503,7 +548,8 @@ def artists_cli() -> None:
         print()
 
 
-def add_artist(artists: list[Artist], name: str, picks: list[tuple[str, str, str]], save: bool = True) -> Artist:
+def add_artist(artists: list[Artist], name: str, picks: list[tuple[str, str, str]], save: bool = True,
+               chat_id: int = CHAT_ID) -> Artist:
     """Merge (platform, id, label) picks into the artist (created if new) and save the file."""
     art = next((a for a in artists if _norm(a.name) == _norm(name)), None)
     if art is None:
@@ -517,7 +563,7 @@ def add_artist(artists: list[Artist], name: str, picks: list[tuple[str, str, str
             notes.append(label[:40])
     art.note = ", ".join(dict.fromkeys(n for n in notes if n))
     if save:
-        write_artists(artists)
+        write_artists(artists, chat_id)
     return art
 
 

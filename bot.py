@@ -27,7 +27,8 @@ import lyrics
 import playlists
 import releases
 import ui
-from core import ALLOWED_CB, ALLOWED_MSG, BOT_TOKEN, CHAT_ID, can_use, db, log
+import workspaces
+from core import ALLOWED_CB, ALLOWED_MSG, BOT_TOKEN, CHAT_ID, MAIN_LINK, can_use, db, log
 
 router = Router()
 
@@ -154,6 +155,16 @@ async def setup_identity(bot: Bot) -> None:
         log.warning("could not set up bot identity: %s", e)
 
 
+async def setup_main_link(bot: Bot) -> None:
+    """Link shown to everyone as the creator's recommended group (MAIN_GROUP_LINK, else an invite link)."""
+    if MAIN_LINK["url"]:
+        return
+    try:
+        MAIN_LINK["url"] = await bot.export_chat_invite_link(CHAT_ID)
+    except Exception as e:
+        log.warning("no invite link for the main group (set MAIN_GROUP_LINK in .env): %s", e)
+
+
 async def main() -> None:
     if not BOT_TOKEN or not CHAT_ID:
         sys.exit("BOT_TOKEN and CHAT_ID must be set in .env")
@@ -161,10 +172,12 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(access.router)  # first: unverified/blocked people never reach the rest
     dp.include_router(router)  # lyrics first, then the menu
+    dp.include_router(workspaces.router)
     dp.include_router(ui.router)
     dp.include_router(favorites.router)
     await setup_identity(bot)
     access.announce_claim()
+    await setup_main_link(bot)
     try:
         cmds = [
             BotCommand(command="menu", description="Open the menu"),
@@ -176,8 +189,9 @@ async def main() -> None:
             BotCommand(command="status", description="Bot health and failed songs"),
             BotCommand(command="lyrics", description="Find lyrics (sent to you privately)"),
         ]
+        priv = cmds + [BotCommand(command="groups", description="My connected groups")]
         await bot.set_my_commands(cmds, scope=BotCommandScopeAllGroupChats())
-        await bot.set_my_commands(cmds, scope=BotCommandScopeAllPrivateChats())
+        await bot.set_my_commands(priv, scope=BotCommandScopeAllPrivateChats())
     except Exception as e:
         log.warning("could not set bot commands: %s", e)
     try:
@@ -185,7 +199,7 @@ async def main() -> None:
             playlists.sync_loop(bot),
             releases.release_loop(bot),
             # handle_signals=False: let SIGTERM from systemd stop the whole process
-            dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction"], handle_signals=False),
+            dp.start_polling(bot, allowed_updates=["message", "callback_query", "message_reaction", "my_chat_member"], handle_signals=False),
         )
     finally:
         await bot.session.close()

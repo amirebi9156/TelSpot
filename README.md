@@ -1,5 +1,7 @@
 # Tel Spot
 
+**English** · [فارسی](README.fa.md)
+
 Your music, in Telegram. One private supergroup with Topics, and a light bot (single process, no ffmpeg, SQLite state) that does three things:
 
 1. **Playlists**: every Spotify playlist becomes a topic; its tracks are uploaded as audio and new tracks are picked up automatically. The playlist cover is posted (and pinned) at the top of its topic.
@@ -12,9 +14,21 @@ Your music, in Telegram. One private supergroup with Topics, and a light bot (si
 
 No Spotify login, developer app or Premium is needed. Playlists are read from Spotify's public embed page, so each playlist just has to be **Public**.
 
+## Personal groups (multi-user)
+
+Tel Spot is built so that **your server is the origin and everyone personalizes it**:
+
+- **Without a group**: anybody who starts the bot can search songs / artists / lyrics-by-memory and get lyrics in private chat. Songs are sent only to that chat.
+- **With their own group**: tap **➕ Connect my own group** (or add the bot to any supergroup with **Topics** on and make it admin with *Manage topics*). The bot checks the group, tells what is missing (with a *Check again* button), then the person gets their own playlists, followed artists, 🆕 New Releases, 🎧 Picks and ❤️ Favorites topics, fully separate from everybody else. The one who added the bot and the group's admins manage it; members can search and get songs.
+- **Your (the owner's) group** is shown to everyone as the **⭐ Recommended group**. Regular users cannot add songs, topics or playlists to it; they only search and receive songs privately. Hearts (❤️) in it count for the owner only.
+- **Optional or mandatory**: in `/settings` (owner, private chat) switch *joining the main group* between **optional** (default) and **mandatory** (people who have not joined cannot use the bot at all, and cannot connect groups).
+- **Limits** for non-owners (`.env`): `USER_MAX_GROUPS` (2), `USER_MAX_PLAYLISTS` (5 per group), `USER_MAX_ARTISTS` (15 per group), `USER_SONGS_PER_HOUR` (20). Set `MAIN_GROUP_LINK` to your invite link (else the bot tries to create one).
+- If the bot is removed from a group it is disconnected and its owner is told; the data is kept.
+- In BotFather enable **Allow Groups** for the bot (default on). Use `/groups` in private to switch between your groups.
+
 ## Using it from Telegram
 
-Works in the group and in a private chat with the bot (DM only for members of the group). Send `/menu` for buttons.
+Works in a group the bot is connected to and in a private chat with the bot. Send `/menu` for buttons. Management (add/remove playlists, follow artists, 👥 add to group) is for the group's owner and admins; in the owner's main group only the owner manages.
 
 | Command | What it does |
 | --- | --- |
@@ -82,6 +96,7 @@ Afterwards open the management menu any time with `sudo telspot`. It covers inst
 | `RELEASES_TOPIC_NAME` | Name of the new-releases topic |
 | `PICKS_TOPIC_NAME` | Name of the topic for songs added from search |
 | `ACCESS_ANSWER`, `ACCESS_QUESTION`, `OWNER_ID` | Secret question for new users, and the owner's id (see Access control) |
+| `MAIN_GROUP_LINK`, `USER_MAX_GROUPS`, `USER_MAX_PLAYLISTS`, `USER_MAX_ARTISTS`, `USER_SONGS_PER_HOUR` | Recommended-group link and limits for personal groups |
 | `FAV_TOPIC_NAME`, `FAV_EMOJIS` | Favorites topic name; reactions that count as a like (default `❤`, e.g. `❤,🔥`) |
 | `RELEASE_MAX_AGE_HOURS`, `RELEASE_MIN_SECONDS`, `RELEASE_MAX_SECONDS` | Release filters |
 | `YTDLP_COOKIES` | Optional cookies.txt path if YouTube blocks the server |

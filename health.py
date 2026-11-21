@@ -54,7 +54,14 @@ async def admin_ids(bot: Bot) -> list[int]:
     return ids
 
 
-async def alert(bot: Bot, text: str) -> None:
+async def alert(bot: Bot, text: str, to: int | None = None) -> None:
+    """Message the owner of a connected group (`to`) or, by default, the admins of the main group."""
+    if to:
+        try:
+            await bot.send_message(to, text, disable_web_page_preview=True)
+        except Exception as e:
+            log.warning("alert to %s failed: %s", to, e)
+        return
     sent = 0
     for uid in await admin_ids(bot):
         try:
@@ -69,7 +76,7 @@ async def alert(bot: Bot, text: str) -> None:
             log.warning("alert could not be delivered: %s", e)
 
 
-async def fail(bot: Bot, key: str, what: str, err: str = "", threshold: int = 3) -> bool:
+async def fail(bot: Bot, key: str, what: str, err: str = "", threshold: int = 3, to: int | None = None) -> bool:
     """Count a failure; alert when it happened `threshold` times in a row. Returns True if alerted now."""
     _fails[key] = _fails.get(key, 0) + 1
     if _fails[key] < threshold:
@@ -81,16 +88,16 @@ async def fail(bot: Bot, key: str, what: str, err: str = "", threshold: int = 3)
     h = hint(err)
     short = (err or "").strip().splitlines()[-1][:200] if err else ""
     RECENT.appendleft((time.time(), what))
-    await alert(bot, f"⚠️ {what}\n({_fails[key]} failures in a row)" + (f"\n{short}" if short else "") + (f"\n\n💡 {h}" if h else ""))
+    await alert(bot, f"⚠️ {what}\n({_fails[key]} failures in a row)" + (f"\n{short}" if short else "") + (f"\n\n💡 {h}" if h else ""), to)
     return True
 
 
-async def ok(bot: Bot, key: str, what: str = "") -> None:
+async def ok(bot: Bot, key: str, what: str = "", to: int | None = None) -> None:
     n = _fails.pop(key, 0)
     if key in _alerted:
         _alerted.pop(key, None)
         if what:
-            await alert(bot, f"✅ Recovered: {what}")
+            await alert(bot, f"✅ Recovered: {what}", to)
     return None
 
 

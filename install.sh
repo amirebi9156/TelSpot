@@ -89,6 +89,7 @@ configure() {
     "CHAT_ID|Telegram supergroup id (starts with -100)"
     "OWNER_ID|Your numeric Telegram id (owner; empty = claim later with /claim)"
     "ACCESS_ANSWER|Secret answer new users must give (empty = no question)"
+    "MAIN_GROUP_LINK|Invite link of your group, shown to users as recommended (empty = auto)"
   )
   local p key label cur shown val
   for p in "${pairs[@]}"; do

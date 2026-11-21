@@ -5,11 +5,12 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import aiohttp
 import yt_dlp
-from aiogram import F, Bot
+from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 
@@ -35,6 +36,11 @@ BOT_TOKEN = _env("BOT_TOKEN")
 # --- access control: members must answer a secret question the first time (empty = no question)
 ACCESS_ANSWERS = [a.strip().lower().replace(" ", "") for a in _env("ACCESS_ANSWER").split(",") if a.strip()]
 ACCESS_QUESTION = _env("ACCESS_QUESTION", "🔐 Secret question: what is the codename of the creator of this project?")
+USER_MAX_GROUPS = int(_env("USER_MAX_GROUPS", "2") or 2)        # groups one (non-owner) user may connect
+USER_MAX_PLAYLISTS = int(_env("USER_MAX_PLAYLISTS", "5") or 5)  # per personal group
+USER_MAX_ARTISTS = int(_env("USER_MAX_ARTISTS", "15") or 15)    # per personal group
+USER_SONGS_PER_HOUR = int(_env("USER_SONGS_PER_HOUR", "20") or 20)  # search downloads per person
+MAIN_GROUP_LINK = _env("MAIN_GROUP_LINK")  # invite link of the recommended group (else the bot makes one)
 OWNER_ENV = int(_env("OWNER_ID", "0") or 0)  # your numeric Telegram id (or claim it with /claim)
 CHAT_ID = int(_env("CHAT_ID", "0") or 0)  # supergroup id, like -100123456789
 SYNC_INTERVAL = int(_env("SYNC_INTERVAL", "600"))  # playlist check interval, seconds
@@ -91,7 +97,7 @@ db.executescript(
     CREATE TABLE IF NOT EXISTS source_state (src TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS attempts (item TEXT PRIMARY KEY, n INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS lyrics_cache (key TEXT PRIMARY KEY, text TEXT);
-    CREATE TABLE IF NOT EXISTS audios (msg_id INTEGER PRIMARY KEY, key TEXT);
+    CREATE TABLE IF NOT EXISTS ws (chat_id INTEGER PRIMARY KEY, owner_uid INTEGER, title TEXT, created_at INTEGER);
     CREATE TABLE IF NOT EXISTS audio_meta (key TEXT PRIMARY KEY, artist TEXT, title TEXT, duration INTEGER);
     CREATE TABLE IF NOT EXISTS users (
         uid INTEGER PRIMARY KEY, username TEXT, name TEXT, first_seen INTEGER, last_seen INTEGER,
@@ -101,6 +107,14 @@ db.executescript(
         key TEXT PRIMARY KEY, dz_id INTEGER, artist TEXT, title TEXT, added_at TEXT DEFAULT CURRENT_TIMESTAMP);
     """
 )
+_cols = [r[1] for r in db.execute("PRAGMA table_info(audios)")]
+if _cols and "chat_id" not in _cols:  # older versions knew a single group only
+    db.executescript(
+        f"ALTER TABLE audios RENAME TO audios_old;"
+        f"CREATE TABLE audios (chat_id INTEGER, msg_id INTEGER, key TEXT, PRIMARY KEY (chat_id, msg_id));"
+        f"INSERT INTO audios SELECT {CHAT_ID}, msg_id, key FROM audios_old; DROP TABLE audios_old;")
+elif not _cols:
+    db.execute("CREATE TABLE audios (chat_id INTEGER, msg_id INTEGER, key TEXT, PRIMARY KEY (chat_id, msg_id))")
 try:  # databases created by older versions have no cover_sent column
     db.execute("ALTER TABLE playlists ADD COLUMN cover_sent INTEGER DEFAULT 0")
 except sqlite3.OperationalError:
@@ -129,34 +143,167 @@ async def tg_call(coro_factory):
             await asyncio.sleep(e.retry_after + 1)
 
 
-async def topic_id_for(bot: Bot, key: str, name: str, color: int | None = None, force_new: bool = False) -> int:
-    """Topic id stored under meta[key]; creates the topic when missing (or when force_new)."""
-    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+# --------------------------------------------------------------- groups
+# Every connected group is a "workspace" with its own playlists, artists, topics and history.
+# The main group (CHAT_ID) belongs to the owner. Data of other groups is stored under keys
+# prefixed with "<chat id>|" so one database serves all of them.
+def is_main(chat_id: int) -> bool:
+    return chat_id == CHAT_ID
+
+
+def sk(chat_id: int, key: str) -> str:
+    """Scoped key: unchanged for the main group (keeps old data valid), prefixed otherwise."""
+    return key if chat_id == CHAT_ID else f"{chat_id}|{key}"
+
+
+def scope_where(chat_id: int, col: str) -> tuple[str, tuple]:
+    """SQL condition that selects the rows of one group in a table whose `col` holds scoped keys."""
+    if chat_id == CHAT_ID:
+        return f"{col} NOT LIKE '%|%'", ()
+    return f"{col} LIKE ?", (f"{chat_id}|%",)
+
+
+def ws_dir(chat_id: int) -> Path:
+    d = Path(DB_PATH).resolve().parent / "ws" / str(abs(chat_id))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def playlists_file(chat_id: int) -> str:
+    return PLAYLISTS_FILE if chat_id == CHAT_ID else str(ws_dir(chat_id) / "playlists.txt")
+
+
+def artists_file(chat_id: int) -> str:
+    return ARTISTS_FILE if chat_id == CHAT_ID else str(ws_dir(chat_id) / "artists.txt")
+
+
+def ws_register(chat_id: int, owner_uid: int, title: str) -> None:
+    db.execute("INSERT INTO ws VALUES (?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, "
+               "owner_uid=excluded.owner_uid", (chat_id, owner_uid, title or "", int(time.time())))
+    db.commit()
+
+
+def ws_unregister(chat_id: int) -> None:
+    db.execute("DELETE FROM ws WHERE chat_id=?", (chat_id,))
+    db.commit()
+
+
+def ws_ids() -> list[int]:
+    """Main group first, then every connected group."""
+    ids = [CHAT_ID] if CHAT_ID else []
+    return ids + [r[0] for r in db.execute("SELECT chat_id FROM ws ORDER BY created_at")]
+
+
+def ws_owner(chat_id: int) -> int:
+    if chat_id == CHAT_ID:
+        return owner_id()
+    r = db.execute("SELECT owner_uid FROM ws WHERE chat_id=?", (chat_id,)).fetchone()
+    return r[0] if r else 0
+
+
+def ws_title(chat_id: int) -> str:
+    if chat_id == CHAT_ID:
+        return "Main group"
+    r = db.execute("SELECT title FROM ws WHERE chat_id=?", (chat_id,)).fetchone()
+    return (r[0] if r else "") or str(chat_id)
+
+
+def user_ws(uid: int) -> list[int]:
+    """Groups this person owns (the owner also manages the main group)."""
+    ids = [r[0] for r in db.execute("SELECT chat_id FROM ws WHERE owner_uid=? ORDER BY created_at", (uid,))]
+    return ([CHAT_ID] if CHAT_ID and is_owner(uid) else []) + ids
+
+
+def active_ws(uid: int) -> int | None:
+    """The group a private-chat menu works on."""
+    mine = user_ws(uid)
+    if not mine:
+        return None
+    r = db.execute("SELECT value FROM meta WHERE key=?", (f"active:{uid}",)).fetchone()
+    return int(r[0]) if r and int(r[0]) in mine else mine[0]
+
+
+def set_active_ws(uid: int, chat_id: int) -> None:
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (f"active:{uid}", str(chat_id)))
+    db.commit()
+
+
+def limits(chat_id: int) -> tuple[int, int]:
+    """(max playlists, max artists) for a group; the main group has no limit."""
+    return (10**6, 10**6) if chat_id == CHAT_ID else (USER_MAX_PLAYLISTS, USER_MAX_ARTISTS)
+
+
+_song_log: dict[int, list[float]] = {}
+
+
+def song_quota(uid: int) -> bool:
+    """True if this person may fetch another song now (per-hour limit, owner exempt)."""
+    if is_owner(uid):
+        return True
+    now = time.time()
+    lst = [t for t in _song_log.get(uid, []) if now - t < 3600]
+    if len(lst) >= USER_SONGS_PER_HOUR:
+        _song_log[uid] = lst
+        return False
+    lst.append(now)
+    _song_log[uid] = lst
+    return True
+
+
+def setting(key: str, default: str = "") -> str:
+    r = db.execute("SELECT value FROM meta WHERE key=?", (f"cfg:{key}",)).fetchone()
+    return r[0] if r else default
+
+
+def set_setting(key: str, value: str) -> None:
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (f"cfg:{key}", value))
+    db.commit()
+
+
+def require_join() -> bool:
+    """Owner's switch: must people join the main group before they may use the bot?"""
+    return setting("require_join", "0") == "1"
+
+
+MAIN_LINK = {"url": MAIN_GROUP_LINK}  # filled at start when empty
+
+
+async def topic_id_for(bot: Bot, chat_id: int, key: str, name: str, color: int | None = None,
+                       force_new: bool = False) -> int:
+    """Topic id stored under meta[key] for that group; creates the topic when missing (or when force_new)."""
+    mk = sk(chat_id, key)
+    row = db.execute("SELECT value FROM meta WHERE key=?", (mk,)).fetchone()
     if row and not force_new:
         return int(row[0])
     kw = {"icon_color": color} if color else {}
-    topic = await tg_call(lambda: bot.create_forum_topic(CHAT_ID, name[:128], **kw))
-    db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (key, str(topic.message_thread_id)))
+    topic = await tg_call(lambda: bot.create_forum_topic(chat_id, name[:128], **kw))
+    db.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (mk, str(topic.message_thread_id)))
     db.commit()
     return topic.message_thread_id
 
 
-def record_audio(msg_id: int, song_key: str, artist: str = "", title: str = "", duration: int = 0) -> None:
+def topic_known(chat_id: int, key: str) -> int | None:
+    row = db.execute("SELECT value FROM meta WHERE key=?", (sk(chat_id, key),)).fetchone()
+    return int(row[0]) if row else None
+
+
+def record_audio(chat_id: int, msg_id: int, song_key: str, artist: str = "", title: str = "", duration: int = 0) -> None:
     """Remember which song a group message holds (needed to react ❤️ -> Favorites)."""
-    db.execute("INSERT OR REPLACE INTO audios VALUES (?, ?)", (msg_id, song_key))
+    db.execute("INSERT OR REPLACE INTO audios VALUES (?, ?, ?)", (chat_id, msg_id, song_key))
     if title:
         db.execute("INSERT OR REPLACE INTO audio_meta VALUES (?,?,?,?)", (song_key, artist, title, int(duration or 0)))
     db.commit()
 
 
-async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, audio, song_key: str | None = None, **kw):
-    """Send audio into a named topic; recreate the topic once if someone deleted it."""
+async def send_audio_topic(bot: Bot, chat_id: int, key: str, name: str, color: int | None, audio,
+                           song_key: str | None = None, **kw):
+    """Send audio into a named topic of a group; recreate the topic once if someone deleted it."""
     for attempt in (1, 2):
-        topic_id = await topic_id_for(bot, key, name, color, force_new=(attempt == 2))
+        topic_id = await topic_id_for(bot, chat_id, key, name, color, force_new=(attempt == 2))
         try:
-            msg = await tg_call(lambda: bot.send_audio(CHAT_ID, audio, message_thread_id=topic_id, **kw))
+            msg = await tg_call(lambda: bot.send_audio(chat_id, audio, message_thread_id=topic_id, **kw))
             if song_key:
-                record_audio(msg.message_id, song_key, kw.get("performer") or "", kw.get("title") or "",
+                record_audio(chat_id, msg.message_id, song_key, kw.get("performer") or "", kw.get("title") or "",
                              kw.get("duration") or 0)
             return msg
         except TelegramBadRequest as e:
@@ -170,9 +317,12 @@ async def send_audio_topic(bot: Bot, key: str, name: str, color: int | None, aud
 ANON_ADMIN_ID = 1087968824  # Telegram's "GroupAnonymousBot" (admin posting anonymously)
 
 
-async def _status(bot: Bot, uid: int) -> str:
+MEMBER_STATUSES = ("creator", "administrator", "member", "restricted")
+
+
+async def _status(bot: Bot, uid: int, chat_id: int | None = None) -> str:
     try:
-        return (await bot.get_chat_member(CHAT_ID, uid)).status
+        return (await bot.get_chat_member(chat_id or CHAT_ID, uid)).status
     except Exception:
         return "left"
 
@@ -189,19 +339,45 @@ def is_owner(uid: int) -> bool:
     return bool(uid) and uid == owner_id()
 
 
-async def is_admin(bot: Bot, uid: int) -> bool:
-    return is_owner(uid) or uid == ANON_ADMIN_ID or await _status(bot, uid) in ("creator", "administrator")
+async def is_admin(bot: Bot, uid: int, chat_id: int | None = None) -> bool:
+    """Admin of that group (default: the main group). The owner is admin everywhere."""
+    return is_owner(uid) or uid == ANON_ADMIN_ID or await _status(bot, uid, chat_id) in ("creator", "administrator")
+
+
+async def can_manage(bot: Bot, chat_id: int | None, uid: int) -> bool:
+    """May this person change things (playlists, artists, add songs) in that group?
+    Main group: the owner only. Connected groups: its owner and its admins."""
+    if not chat_id or chat_id not in ws_ids():
+        return False
+    if is_owner(uid):
+        return True
+    if chat_id == CHAT_ID:
+        return False
+    return uid == ws_owner(chat_id) or await is_admin(bot, uid, chat_id)
+
+
+async def joined_main(bot: Bot, uid: int) -> bool:
+    return is_owner(uid) or (bool(CHAT_ID) and await _status(bot, uid, CHAT_ID) in MEMBER_STATUSES)
 
 
 async def can_use(bot: Bot, chat, uid: int) -> bool:
-    """Inside the music group: anyone there. In a private chat: only group members."""
-    if chat.id == CHAT_ID:
+    """Private chat: anyone (personal mode). Groups: only connected ones. If the owner made joining the
+    main group mandatory, people who have not joined it cannot use the bot anywhere."""
+    if is_owner(uid):
         return True
-    return await _status(bot, uid) in ("creator", "administrator", "member", "restricted")
+    if require_join() and not await joined_main(bot, uid):
+        return False
+    return chat.type == "private" or chat.id in ws_ids()
 
 
-ALLOWED_MSG = (F.chat.id == CHAT_ID) | (F.chat.type == "private")
-ALLOWED_CB = (F.message.chat.id == CHAT_ID) | (F.message.chat.type == "private")
+async def ALLOWED_MSG(event) -> bool:
+    c = event.chat
+    return c.type == "private" or c.id in ws_ids()
+
+
+async def ALLOWED_CB(event) -> bool:
+    m = event.message
+    return bool(m) and (m.chat.type == "private" or m.chat.id in ws_ids())
 
 
 async def fetch_image(session: aiohttp.ClientSession, url: str, max_bytes: int = 10_000_000) -> bytes | None:

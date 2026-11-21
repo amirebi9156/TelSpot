@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 from core import (
-    ACCESS_ANSWERS, ACCESS_QUESTION, ANON_ADMIN_ID, CHAT_ID, db, is_owner, log, owner_id,
+    ACCESS_ANSWERS, ACCESS_QUESTION, ANON_ADMIN_ID, CHAT_ID, db, is_owner, log, owner_id, ws_ids,
 )
 
 router = Router()
@@ -223,7 +223,11 @@ async def on_unverified_private(m: Message, bot: Bot) -> None:
     await m.answer(f"Wrong answer ({MAX_FAILS - fails} tries left).", reply_markup=ForceReply())
 
 
-@router.message(F.chat.id == CHAT_ID, UNVERIFIED, F.text.func(lambda t: t.startswith("/")))
+async def IN_WS(m) -> bool:
+    return m.chat.id in ws_ids()
+
+
+@router.message(IN_WS, UNVERIFIED, F.text.func(lambda t: t.startswith("/")))
 async def on_unverified_group_command(m: Message, bot: Bot) -> None:
     first = m.text.split()[0]
     me = await bot.me()
