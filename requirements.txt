@@ -2,3 +2,4 @@ aiogram>=3.13
 aiohttp>=3.9
 yt-dlp
 shazamio
+imageio-ffmpeg

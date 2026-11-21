@@ -13,13 +13,25 @@ CLIP_SECONDS = 25
 MAX_BYTES = 20 * 1024 * 1024  # Telegram bots can download up to 20 MB
 
 
+def ffmpeg() -> str | None:
+    """System ffmpeg, else the static binary shipped by the imageio-ffmpeg pip package."""
+    for p in (shutil.which("ffmpeg"), "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if p and os.path.exists(p):
+            return p
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
 def missing() -> str | None:
     """What is not installed (None = ready)."""
     try:
         import shazamio  # noqa: F401
     except Exception as e:
         return f"python package shazamio ({type(e).__name__}: {str(e)[:120]})"
-    if shutil.which("ffmpeg") is None:
+    if ffmpeg() is None:
         return "ffmpeg"
     return None
 
@@ -31,7 +43,7 @@ def available() -> bool:
 async def _to_wav(src: str, dst: str) -> bool:
     """Mono 16 kHz wav of the loudest-looking part: skip 0 s, keep CLIP_SECONDS."""
     p = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn", "-t", str(CLIP_SECONDS), "-ac", "1", "-ar", "16000", dst,
+        ffmpeg() or "ffmpeg", "-y", "-loglevel", "error", "-i", src, "-vn", "-t", str(CLIP_SECONDS), "-ac", "1", "-ar", "16000", dst,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
     _, err = await p.communicate()
     if p.returncode != 0:
