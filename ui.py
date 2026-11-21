@@ -314,6 +314,39 @@ async def do_lyrics_search(bot: Bot, m: Message, query: str) -> None:
     await say(bot, m, f"📝 <b>{esc(query)}</b>\n<blockquote>Pick the song to get its lyrics.</blockquote>", KB(rows))
 
 
+async def recognize_clip(bot: Bot, m: Message) -> None:
+    """Identify the song in a voice message / video / audio clip, then offer it like a search result."""
+    import recognize
+    if not recognize.available():
+        return await say(bot, m, "Song recognition is not installed on this server yet (owner: run <code>sudo telspot update</code>).")
+    f = m.voice or m.video_note or m.video or m.audio
+    suffix = {"voice": ".ogg", "video_note": ".mp4", "video": ".mp4"}.get(
+        "voice" if m.voice else "video_note" if m.video_note else "video" if m.video else "", ".mp3")
+    wait = await say(bot, m, "🎧 Listening…")
+    try:
+        hit = await recognize.identify(bot, f.file_id, getattr(f, "file_size", 0) or 0, suffix)
+    except ValueError:
+        hit, err = None, "That file is too big (max 20 MB). Send a shorter clip."
+    except Exception as e:
+        log.warning("recognition failed: %s", e)
+        hit, err = None, "Recognition failed right now. Try again in a minute."
+    else:
+        err = "I could not recognise that. Try a clearer, longer clip (10-20 s) with less noise, or type a lyric line."
+    try:
+        await bot.delete_message(m.chat.id, wait.message_id)
+    except Exception:
+        pass
+    if not hit:
+        return await say(bot, m, "❓ " + err)
+    token = secrets.token_hex(3)
+    if len(LYR) > 100:
+        LYR.clear()
+    LYR[token] = [dict(artist=hit["artist"], title=hit["title"], duration=0)]
+    await say(bot, m, f"🎶 <b>{esc(hit['artist'])} — {esc(hit['title'])}</b>",
+              KB([[B("📝  Lyrics", f"lg:{token}:0")]]))
+    await do_search(bot, m, f"{hit['artist']} {hit['title']}".strip())
+
+
 async def check_connections() -> list[str]:
     targets = {
         "Telegram": "https://api.telegram.org", "Spotify": "https://open.spotify.com",

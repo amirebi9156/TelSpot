@@ -211,9 +211,9 @@ install_deps() {
   info "Installing system packages..."
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates || return 1
+    apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates ffmpeg || return 1
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y -q python3 python3-pip git curl || return 1
+    dnf install -y -q python3 python3-pip git curl ffmpeg-free || return 1
   elif command -v yum >/dev/null 2>&1; then
     yum install -y -q python3 python3-pip git curl || return 1
   else
@@ -328,6 +328,10 @@ do_install() {
 do_update() {
   is_installed || { err "Not installed"; return 1; }
   fetch_code || return 1
+  if ! command -v ffmpeg >/dev/null 2>&1; then  # needed for song recognition from voice/video
+    info "Installing ffmpeg..."
+    { apt-get install -y -qq ffmpeg || dnf install -y -q ffmpeg-free || yum install -y -q ffmpeg; } >/dev/null 2>&1 || true
+  fi
   setup_venv || return 1
   write_service
   systemctl restart "$SERVICE" && ok "Updated and restarted"

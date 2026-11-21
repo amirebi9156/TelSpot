@@ -25,6 +25,7 @@ import access
 import favorites
 import lyrics
 import playlists
+import recognize
 import releases
 import ui
 import workspaces
@@ -118,12 +119,24 @@ async def on_reply_word(message: Message, bot: Bot) -> None:
         await lyrics_for_audio(bot, message.reply_to_message, message.from_user.id, gm)
 
 
-@router.message(F.chat.type == "private", F.audio)
+def _has_name(a) -> bool:
+    return bool(a.title or a.performer or " - " in (a.file_name or ""))
+
+
+@router.message(F.chat.type == "private", F.audio, F.audio.func(_has_name))
 async def on_private_audio(message: Message, bot: Bot) -> None:
-    """Send me a music file in private and I find its lyrics."""
+    """Send me a tagged music file in private and I find its lyrics."""
     if not await can_use(bot, message.chat, message.from_user.id):
         return
     await lyrics_for_audio(bot, message, message.from_user.id)
+
+
+@router.message(F.chat.type == "private", F.voice | F.video_note | F.video | F.audio)
+async def on_private_clip(message: Message, bot: Bot) -> None:
+    """A voice message / video / untagged audio: find out which song it is (Shazam-style)."""
+    if not await can_use(bot, message.chat, message.from_user.id):
+        return
+    await ui.recognize_clip(bot, message)
 
 
 PROFILE_VERSION = "telspot-1"  # bump to push a new name/description to Telegram on next start
